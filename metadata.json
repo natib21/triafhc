@@ -1,0 +1,6 @@
+{
+  "name": "FHC Admin Dashboard",
+  "description": "Administrative dashboard for managing institution categories, labels, tiers, ranks, titles, user extensions, and house allocation requests.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
