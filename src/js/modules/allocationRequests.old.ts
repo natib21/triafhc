@@ -1,9 +1,9 @@
 // House Allocation Requests Module
 import { store } from '../store';
-import { Modal, Toast } from '../components';
+import { Modal, Toast,Table } from '../components';
 
 // ─── CONSTANTS ─────────────────────────────────────────────────────────────
-
+const BENEFICIARY_PAGE_SIZE = 20;
 const STATUS_MAP = {
   'draft': { label: 'Draft', color: 'bg-slate-50 text-slate-600 border-slate-200' },
   'submitted': { label: 'Submitted', color: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -24,11 +24,12 @@ const WORKFLOW_STEPS = [
   { key: 'under_director_review', label: 'Director Review', icon: 'fa-regular fa-user' },
   { key: 'pending_team_leader_decision', label: 'Team Leader Review', icon: 'fa-regular fa-clipboard-check' },
   { key: 'under_team_officer_review', label: 'Team Officer Review', icon: 'fa-regular fa-user-gear' },
-  { key: 'partial_waiting_list', label: 'Partial Waiting List', icon: 'fa-regular fa-clock', conditional: true },
-  { key: 'partial_allocation', label: 'Partial Allocation', icon: 'fa-regular fa-building', conditional: true },
-  { key: 'waiting_list', label: 'Waiting List', icon: 'fa-regular fa-list', conditional: true },
-  { key: 'allocated', label: 'Allocated', icon: 'fa-regular fa-circle-check', conditional: true }
-];
+//   { key: 'partial_waiting_list', label: 'Partial Waiting List', icon: 'fa-regular fa-clock', conditional: true },
+//   { key: 'partial_allocation', label: 'Partial Allocation', icon: 'fa-regular fa-building', conditional: true },
+//   { key: 'waiting_list', label: 'Waiting List', icon: 'fa-regular fa-list', conditional: true },
+//   { key: 'allocated', label: 'Allocated', icon: 'fa-regular fa-circle-check', conditional: true }
+// ];
+]
 
 const BENEFICIARY_STATUS_MAP = {
   'pending_review': { label: 'Pending Review', color: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -47,6 +48,41 @@ const WORKFLOW_ROLE_MAP = {
   'under_team_officer_review': { role: 'team_officer', action: 'process', label: 'Process Beneficiaries' }
 };
 
+
+const OVERRIDE_LEGEND = {
+  label: 'Priority Override',
+  icon: 'fa-solid fa-flag',
+  color: 'bg-rose-100 text-rose-700 border-rose-300',
+  description: 'Manual override that places the beneficiary at the front of the queue, bypassing standard priority rules (tier, history, rank, FIFO).'
+};
+const BENEFICIARY_STATUS_OPTIONS = [
+  { value: '', label: 'All Statuses' },
+  { value: 'pending_review', label: 'Pending Review' },
+  { value: 'eligible', label: 'Eligible' },
+  { value: 'under_legal_revision', label: 'Legal Revision' },
+  { value: 'waiting_list', label: 'Waiting List' },
+  { value: 'allocated', label: 'Allocated' },
+  { value: 'unauthorized_by_directive', label: 'Unauthorized' }
+];
+
+type PriorityFactorKey = 'override' | 'tier' | 'history' | 'rank';
+
+interface PriorityFactorPreviewResponse {
+  beneficiaryId: string;
+  factor: PriorityFactorKey;
+  currentPosition: number;
+  previewPosition: number;
+  total: number;
+  positionChanged: boolean;
+  explanation: {
+    isOverride: boolean;
+    institution: { id: string | null; name: string; tierCode: string | null; tierPriority: number | null; allocationHistoryCount: number };
+    beneficiary: { id: string | null; rankCode: string | null; rankPriority: number | null };
+    registeredAt: string | null;
+    priorityReason: string[];
+  };
+  message: string;
+}
 // ─── MODULE STATE ──────────────────────────────────────────────────────────
 
 let isRendering = false;
@@ -56,7 +92,655 @@ let storeUnsubscribe = null;
 let currentFilter = 'all';
 let searchQuery = '';
 
-// ─── INITIALIZE MODULE ─────────────────────────────────────────────────────
+let activeTab = 'requests'; // 'requests' | 'beneficiaries'
+let beneficiaryViewMode = 'all'; // kept for API compatibility with fetchBeneficiaries
+let beneficiarySelectedRequestId = '';
+// Add these to the MODULE STATE section
+let beneficiaryFilters = {
+  search: '',
+  requestInstitutionId: '',
+  beneficiaryInstitutionId: '',
+  rank: '',
+  status: '',
+  override: '', // '', 'yes', 'no'
+  dateFrom: '',
+  dateTo: '',
+  allocationHistoryMin: '', // New
+  allocationHistoryMax: ''  // New
+};
+let beneficiaryPage = 1;
+let beneficiaryData = [];
+let beneficiaryTotalCount = 0;
+let isLoadingBeneficiaries = false;
+
+
+const BENEFICIARY_STATUS_LEGEND = {
+  'waiting_list': {
+    label: 'Waiting List',
+    color: 'bg-teal-50 text-teal-700 border-teal-200',
+    icon: 'fa-regular fa-clock',
+    description: 'Beneficiary is in the queue waiting for house allocation. They will be processed in priority order.'
+  },
+  'eligible': {
+    label: 'Eligible',
+    color: 'bg-blue-50 text-blue-700 border-blue-200',
+    icon: 'fa-regular fa-circle-check',
+    description: 'Beneficiary has been reviewed and approved by the reviewer. Ready for team officer processing.'
+  },
+  'pending_review': {
+    label: 'Pending Review',
+    color: 'bg-amber-50 text-amber-700 border-amber-200',
+    icon: 'fa-regular fa-hourglass-half',
+    description: 'Beneficiary is awaiting review by the appropriate authority.'
+  },
+  'under_legal_revision': {
+    label: 'Legal Revision',
+    color: 'bg-purple-50 text-purple-700 border-purple-200',
+    icon: 'fa-regular fa-scale-balanced',
+    description: 'Beneficiary requires legal review before proceeding with allocation.'
+  },
+  'allocated': {
+    label: 'Allocated',
+    color: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    icon: 'fa-regular fa-circle-check',
+    description: 'Beneficiary has been successfully allocated a house.'
+  },
+  'unauthorized_by_directive': {
+    label: 'Unauthorized',
+    color: 'bg-rose-50 text-rose-700 border-rose-200',
+    icon: 'fa-regular fa-ban',
+    description: 'Beneficiary has been rejected and is not authorized for allocation.'
+  }
+};
+
+// const OVERRIDE_LEGEND = {
+//   label: 'Priority Override',
+//   icon: 'fa-solid fa-flag',
+//   color: 'bg-rose-100 text-rose-700 border-rose-300',
+//   description: 'Manual override that places the beneficiary at the front of the queue, bypassing standard priority rules (tier, history, rank, FIFO).'
+// };
+
+// ─── BENEFICIARY STATS CARDS ────────────────────────────────────────────
+function renderBeneficiaryStatsCards(data) {
+  const total = data.length;
+  
+  // Status counts
+  const statusCounts = {};
+  const statusOptions = ['waiting_list', 'eligible', 'pending_review', 'under_legal_revision', 'allocated', 'unauthorized_by_directive'];
+  statusOptions.forEach(s => statusCounts[s] = 0);
+  
+  data.forEach(d => {
+    const status = (d.status || '').toLowerCase();
+    if (statusCounts.hasOwnProperty(status)) {
+      statusCounts[status]++;
+    }
+  });
+  
+  // Institution counts
+  const beneficiaryInst = new Set();
+  const requestingInst = new Set();
+  data.forEach(d => {
+    const benInst = d.beneficiaryInstitutionName || getInstitutionName(d.beneficiaryInstitution) || '';
+    if (benInst && benInst !== 'N/A') beneficiaryInst.add(benInst);
+    const reqInst = d.requestingInstitutionName || d.requestingInstitution?.name?.en || '';
+    if (reqInst && reqInst !== 'N/A') requestingInst.add(reqInst);
+  });
+  
+  // Override count
+  const withOverride = data.filter(d => !!(d.isOverrideQueue ?? d.isOverride)).length;
+  
+  // Allocation history stats
+  let totalHistory = 0;
+  let maxHistory = 0;
+  data.forEach(d => {
+    const history = d.allocationHistoryCount ?? d.beneficiaryInstitution?.allocationHistoryCount ?? 0;
+    totalHistory += history;
+    if (history > maxHistory) maxHistory = history;
+  });
+  const avgHistory = data.length > 0 ? (totalHistory / data.length) : 0;
+
+  return `
+    <!-- Main Stats Row -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      <!-- Total Beneficiaries -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-[#714B67]/40 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total Beneficiaries</p>
+          <p class="text-2xl font-extrabold text-slate-900 group-hover:text-[#714B67] transition-colors">${total}</p>
+          <p class="text-[9px] text-slate-400">${beneficiaryInst.size} institutions</p>
+        </div>
+        <div class="p-3 bg-[#714B67]/10 text-[#714B67] rounded-xl group-hover:bg-[#714B67]/20 transition-all">
+          <i class="fa-regular fa-users text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Waiting List -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-teal-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.waiting_list.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-clock text-teal-500"></i> Waiting List
+          </p>
+          <p class="text-2xl font-extrabold text-teal-600 group-hover:text-teal-700 transition-colors">${statusCounts.waiting_list}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.waiting_list/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-teal-50 text-teal-600 rounded-xl group-hover:bg-teal-100 transition-all">
+          <i class="fa-regular fa-list text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Eligible -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-blue-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.eligible.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-circle-check text-blue-500"></i> Eligible
+          </p>
+          <p class="text-2xl font-extrabold text-blue-600 group-hover:text-blue-700 transition-colors">${statusCounts.eligible}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.eligible/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-100 transition-all">
+          <i class="fa-regular fa-circle-check text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Unauthorized -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-rose-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.unauthorized_by_directive.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-ban text-rose-500"></i> Unauthorized
+          </p>
+          <p class="text-2xl font-extrabold text-rose-600 group-hover:text-rose-700 transition-colors">${statusCounts.unauthorized_by_directive}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.unauthorized_by_directive/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-rose-50 text-rose-600 rounded-xl group-hover:bg-rose-100 transition-all">
+          <i class="fa-regular fa-ban text-lg"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Secondary Stats Row -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      <!-- Pending Review -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-amber-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.pending_review.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-hourglass-half text-amber-500"></i> Pending Review
+          </p>
+          <p class="text-2xl font-extrabold text-amber-600 group-hover:text-amber-700 transition-colors">${statusCounts.pending_review}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.pending_review/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-amber-50 text-amber-600 rounded-xl group-hover:bg-amber-100 transition-all">
+          <i class="fa-regular fa-hourglass-half text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Legal Revision -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-purple-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.under_legal_revision.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-scale-balanced text-purple-500"></i> Legal Revision
+          </p>
+          <p class="text-2xl font-extrabold text-purple-600 group-hover:text-purple-700 transition-colors">${statusCounts.under_legal_revision}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.under_legal_revision/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-purple-50 text-purple-600 rounded-xl group-hover:bg-purple-100 transition-all">
+          <i class="fa-regular fa-scale-balanced text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Allocated -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-emerald-400 transition-all group cursor-help" title="${BENEFICIARY_STATUS_LEGEND.allocated.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-circle-check text-emerald-500"></i> Allocated
+          </p>
+          <p class="text-2xl font-extrabold text-emerald-600 group-hover:text-emerald-700 transition-colors">${statusCounts.allocated}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((statusCounts.allocated/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-emerald-50 text-emerald-600 rounded-xl group-hover:bg-emerald-100 transition-all">
+          <i class="fa-regular fa-circle-check text-lg"></i>
+        </div>
+      </div>
+
+      <!-- Override -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-rose-400 transition-all group cursor-help" title="${OVERRIDE_LEGEND.description}">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-solid fa-flag text-rose-500"></i> Override
+          </p>
+          <p class="text-2xl font-extrabold text-rose-600 group-hover:text-rose-700 transition-colors">${withOverride}</p>
+          <p class="text-[9px] text-slate-400">${total > 0 ? Math.round((withOverride/total)*100) : 0}% of total</p>
+        </div>
+        <div class="p-3 bg-rose-50 text-rose-600 rounded-xl group-hover:bg-rose-100 transition-all">
+          <i class="fa-solid fa-flag text-lg"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Institution Stats Row -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-indigo-400 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-building text-indigo-500"></i> Beneficiary Institutions
+          </p>
+          <p class="text-xl font-extrabold text-indigo-600 group-hover:text-indigo-700 transition-colors">${beneficiaryInst.size}</p>
+          <p class="text-[9px] text-slate-400">Unique institutions</p>
+        </div>
+        <div class="p-3 bg-indigo-50 text-indigo-600 rounded-xl group-hover:bg-indigo-100 transition-all">
+          <i class="fa-regular fa-building-columns text-lg"></i>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between hover:border-cyan-400 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <i class="fa-regular fa-file-lines text-cyan-500"></i> Requesting Institutions
+          </p>
+          <p class="text-xl font-extrabold text-cyan-600 group-hover:text-cyan-700 transition-colors">${requestingInst.size}</p>
+          <p class="text-[9px] text-slate-400">Unique institutions</p>
+        </div>
+        <div class="p-3 bg-cyan-50 text-cyan-600 rounded-xl group-hover:bg-cyan-100 transition-all">
+          <i class="fa-regular fa-file-lines text-lg"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Allocation History Stats -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+      <div class="bg-white border border-slate-200 rounded-xl p-3 shadow-sm flex items-center justify-between hover:border-slate-400 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total History</p>
+          <p class="text-xl font-extrabold text-slate-800">${totalHistory}</p>
+          <p class="text-[9px] text-slate-400">Allocations</p>
+        </div>
+        <div class="p-2 bg-slate-100 text-slate-600 rounded-lg group-hover:bg-slate-200 transition-all">
+          <i class="fa-regular fa-list-check text-sm"></i>
+        </div>
+      </div>
+      <div class="bg-white border border-slate-200 rounded-xl p-3 shadow-sm flex items-center justify-between hover:border-slate-400 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Avg History</p>
+          <p class="text-xl font-extrabold text-slate-800">${avgHistory.toFixed(1)}</p>
+          <p class="text-[9px] text-slate-400">Per beneficiary</p>
+        </div>
+        <div class="p-2 bg-slate-100 text-slate-600 rounded-lg group-hover:bg-slate-200 transition-all">
+          <i class="fa-regular fa-chart-simple text-sm"></i>
+        </div>
+      </div>
+      <div class="bg-white border border-slate-200 rounded-xl p-3 shadow-sm flex items-center justify-between hover:border-slate-400 transition-all group">
+        <div>
+          <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Max History</p>
+          <p class="text-xl font-extrabold text-slate-800">${maxHistory}</p>
+          <p class="text-[9px] text-slate-400">Highest allocation count</p>
+        </div>
+        <div class="p-2 bg-slate-100 text-slate-600 rounded-lg group-hover:bg-slate-200 transition-all">
+          <i class="fa-regular fa-arrow-up text-sm"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Legend -->
+    <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4">
+      <p class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-2">
+        <i class="fa-regular fa-circle-info text-[#714B67]"></i> Status Legend
+      </p>
+      <div class="flex flex-wrap gap-3">
+        ${Object.entries(BENEFICIARY_STATUS_LEGEND).map(([key, value]) => `
+          <div class="flex items-center gap-1.5 cursor-help group relative" title="${value.description}">
+            <span class="px-2 py-0.5 ${value.color} border text-[10px] font-bold rounded-md flex items-center gap-1">
+              <i class="${value.icon} text-[9px]"></i>
+              ${value.label}
+            </span>
+            <span class="hidden group-hover:inline text-[9px] text-slate-400">ⓘ</span>
+          </div>
+        `).join('')}
+        <div class="flex items-center gap-1.5 cursor-help group relative" title="${OVERRIDE_LEGEND.description}">
+          <span class="px-2 py-0.5 ${OVERRIDE_LEGEND.color} border text-[10px] font-bold rounded-md flex items-center gap-1">
+            <i class="${OVERRIDE_LEGEND.icon} text-[9px]"></i>
+            ${OVERRIDE_LEGEND.label}
+          </span>
+          <span class="hidden group-hover:inline text-[9px] text-slate-400">ⓘ</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+
+
+// ─── BENEFICIARIES UI RENDERING ─────────────────────────────────────────
+
+function renderBeneficiariesSection() {
+  const container = document.getElementById('beneficiaries-container');
+  if (!container) return;
+
+  const filteredData = applyClientSideBeneficiaryFilters(beneficiaryData);
+  const totalPages = Math.max(1, Math.ceil(beneficiaryTotalCount / BENEFICIARY_PAGE_SIZE));
+
+  container.innerHTML = `
+    <div class="bg-white border border-[#E5E7EB] rounded-xl shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+        <div class="flex items-center gap-2">
+          <i class="fa-regular fa-users text-[#714B67]"></i>
+          <h2 class="text-sm font-bold text-slate-800">Beneficiaries</h2>
+          <span class="text-[10px] text-slate-400 font-medium bg-slate-100 px-2 py-0.5 rounded-full">${beneficiaryTotalCount} total</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-slate-400">${filteredData.length} filtered</span>
+          <button id="ben-refresh-btn" class="flex items-center gap-1 text-xs font-semibold text-[#714B67] hover:underline" ${isLoadingBeneficiaries ? 'disabled' : ''}>
+            <i class="fa-solid fa-rotate ${isLoadingBeneficiaries ? 'animate-spin' : ''}"></i> Refresh
+          </button>
+        </div>
+      </div>
+      
+      <!-- Stats Cards -->
+      <div class="px-4 pt-4">
+        ${!isLoadingBeneficiaries && beneficiaryData.length > 0 ? renderBeneficiaryStatsCards(beneficiaryData) : ''}
+      </div>
+      
+      <!-- Filter Bar -->
+      <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/50">
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Search -->
+          <div class="flex-1 min-w-[140px] max-w-[200px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Search</label>
+            <input type="text" id="ben-search-input" placeholder="By name..." 
+              value="${beneficiaryFilters.search}"
+              class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+          </div>
+          
+          <!-- Status -->
+          <div class="flex-1 min-w-[120px] max-w-[160px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Status</label>
+            <select id="ben-status-filter" class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              ${BENEFICIARY_STATUS_OPTIONS.map(opt => `
+                <option value="${opt.value}" ${beneficiaryFilters.status === opt.value ? 'selected' : ''}>${opt.label}</option>
+              `).join('')}
+            </select>
+          </div>
+          
+          <!-- Override -->
+          <div class="flex-1 min-w-[100px] max-w-[140px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Override</label>
+            <select id="ben-override-filter" class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <option value="">All</option>
+              <option value="yes" ${beneficiaryFilters.override === 'yes' ? 'selected' : ''}>Has Override</option>
+              <option value="no" ${beneficiaryFilters.override === 'no' ? 'selected' : ''}>No Override</option>
+            </select>
+          </div>
+          
+          <!-- Rank -->
+          <div class="flex-1 min-w-[100px] max-w-[140px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Rank</label>
+            <select id="ben-rank-filter" class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <option value="">All Ranks</option>
+              ${getUniqueRanks().map(rank => `
+                <option value="${rank}" ${beneficiaryFilters.rank === rank ? 'selected' : ''}>${rank}</option>
+              `).join('')}
+            </select>
+          </div>
+        </div>
+        
+        <div class="flex flex-wrap items-center gap-2 mt-2">
+          <!-- Beneficiary Institution -->
+          <div class="flex-1 min-w-[140px] max-w-[200px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Beneficiary Institution</label>
+            <select id="ben-beneficiary-inst-filter" class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <option value="">All Institutions</option>
+              ${getUniqueBeneficiaryInstitutions().map(inst => `
+                <option value="${inst.id}" ${beneficiaryFilters.beneficiaryInstitutionId === inst.id ? 'selected' : ''}>${inst.name}</option>
+              `).join('')}
+            </select>
+          </div>
+          
+          <!-- Requesting Institution -->
+          <div class="flex-1 min-w-[140px] max-w-[200px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Requesting Institution</label>
+            <select id="ben-requesting-inst-filter" class="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <option value="">All Institutions</option>
+              ${getUniqueRequestingInstitutions().map(inst => `
+                <option value="${inst.id}" ${beneficiaryFilters.requestInstitutionId === inst.id ? 'selected' : ''}>${inst.name}</option>
+              `).join('')}
+            </select>
+          </div>
+          
+          <!-- Allocation History Range -->
+          <div class="flex-1 min-w-[180px] max-w-[260px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Allocation History</label>
+            <div class="flex items-center gap-1">
+              <input type="number" id="ben-history-min" placeholder="Min" min="0"
+                value="${beneficiaryFilters.allocationHistoryMin || ''}"
+                class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <span class="text-xs text-slate-400">-</span>
+              <input type="number" id="ben-history-max" placeholder="Max" min="0"
+                value="${beneficiaryFilters.allocationHistoryMax || ''}"
+                class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+            </div>
+          </div>
+          
+          <!-- Date Range -->
+          <div class="flex-1 min-w-[200px] max-w-[280px]">
+            <label class="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Registered Date</label>
+            <div class="flex items-center gap-1">
+              <input type="date" id="ben-date-from" 
+                value="${beneficiaryFilters.dateFrom || ''}"
+                class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+              <span class="text-xs text-slate-400">to</span>
+              <input type="date" id="ben-date-to" 
+                value="${beneficiaryFilters.dateTo || ''}"
+                class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-[#714B67]">
+            </div>
+          </div>
+          
+          <button id="ben-clear-filters" class="px-3 py-1 mt-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap">
+            <i class="fa-solid fa-filter-circle-xmark mr-1"></i> Clear
+          </button>
+        </div>
+      </div>
+      
+      <div id="beneficiaries-table-wrap">
+        ${isLoadingBeneficiaries ? renderBeneficiaryLoadingState() : renderBeneficiaryTable()}
+      </div>
+    </div>
+  `;
+
+  // ─── ATTACH FILTER LISTENERS ──────────────────────────────────────────
+  document.getElementById('ben-refresh-btn')?.addEventListener('click', () => {
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-search-input')?.addEventListener('input', (e) => {
+    beneficiaryFilters.search = (e.target as HTMLInputElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-status-filter')?.addEventListener('change', (e) => {
+    beneficiaryFilters.status = (e.target as HTMLSelectElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-override-filter')?.addEventListener('change', (e) => {
+    beneficiaryFilters.override = (e.target as HTMLSelectElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-beneficiary-inst-filter')?.addEventListener('change', (e) => {
+    beneficiaryFilters.beneficiaryInstitutionId = (e.target as HTMLSelectElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-requesting-inst-filter')?.addEventListener('change', (e) => {
+    beneficiaryFilters.requestInstitutionId = (e.target as HTMLSelectElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-rank-filter')?.addEventListener('change', (e) => {
+    beneficiaryFilters.rank = (e.target as HTMLSelectElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-history-min')?.addEventListener('change', (e) => {
+    beneficiaryFilters.allocationHistoryMin = (e.target as HTMLInputElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-history-max')?.addEventListener('change', (e) => {
+    beneficiaryFilters.allocationHistoryMax = (e.target as HTMLInputElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-date-from')?.addEventListener('change', (e) => {
+    beneficiaryFilters.dateFrom = (e.target as HTMLInputElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-date-to')?.addEventListener('change', (e) => {
+    beneficiaryFilters.dateTo = (e.target as HTMLInputElement).value;
+    beneficiaryPage = 1;
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-clear-filters')?.addEventListener('click', () => {
+    beneficiaryFilters.search = '';
+    beneficiaryFilters.status = '';
+    beneficiaryFilters.override = '';
+    beneficiaryFilters.beneficiaryInstitutionId = '';
+    beneficiaryFilters.requestInstitutionId = '';
+    beneficiaryFilters.rank = '';
+    beneficiaryFilters.allocationHistoryMin = '';
+    beneficiaryFilters.allocationHistoryMax = '';
+    beneficiaryFilters.dateFrom = '';
+    beneficiaryFilters.dateTo = '';
+    beneficiaryPage = 1;
+    
+    (document.getElementById('ben-search-input') as HTMLInputElement).value = '';
+    (document.getElementById('ben-status-filter') as HTMLSelectElement).value = '';
+    (document.getElementById('ben-override-filter') as HTMLSelectElement).value = '';
+    (document.getElementById('ben-beneficiary-inst-filter') as HTMLSelectElement).value = '';
+    (document.getElementById('ben-requesting-inst-filter') as HTMLSelectElement).value = '';
+    (document.getElementById('ben-rank-filter') as HTMLSelectElement).value = '';
+    (document.getElementById('ben-history-min') as HTMLInputElement).value = '';
+    (document.getElementById('ben-history-max') as HTMLInputElement).value = '';
+    (document.getElementById('ben-date-from') as HTMLInputElement).value = '';
+    (document.getElementById('ben-date-to') as HTMLInputElement).value = '';
+    fetchBeneficiaries();
+  });
+
+  document.getElementById('ben-page-prev')?.addEventListener('click', () => {
+    if (beneficiaryPage > 1) {
+      beneficiaryPage--;
+      fetchBeneficiaries();
+    }
+  });
+
+  document.getElementById('ben-page-next')?.addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(beneficiaryTotalCount / BENEFICIARY_PAGE_SIZE));
+    if (beneficiaryPage < totalPages) {
+      beneficiaryPage++;
+      fetchBeneficiaries();
+    }
+  });
+}
+
+// ─── HELPER FUNCTIONS FOR FILTERS ──────────────────────────────────────
+
+function getUniqueBeneficiaryInstitutions() {
+  const instMap = new Map();
+  beneficiaryData.forEach(d => {
+    const id = d.beneficiaryInstitution?.id;
+    const name = d.beneficiaryInstitutionName || getInstitutionName(d.beneficiaryInstitution) || '';
+    if (id && name && name !== 'N/A') {
+      instMap.set(id, { id, name });
+    }
+  });
+  return Array.from(instMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getUniqueRequestingInstitutions() {
+  const instMap = new Map();
+  beneficiaryData.forEach(d => {
+    const id = d.requestingInstitution?.id;
+    const name = d.requestingInstitutionName || d.requestingInstitution?.name?.en || '';
+    if (id && name && name !== 'N/A') {
+      instMap.set(id, { id, name });
+    }
+  });
+  return Array.from(instMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getUniqueRanks() {
+  const ranks = new Set();
+  beneficiaryData.forEach(d => {
+    const rank = d.beneficiaryIndividual?.currentRank?.code || '';
+    if (rank && rank !== 'N/A') {
+      ranks.add(rank);
+    }
+  });
+  return Array.from(ranks).sort();
+}
+
+function renderBeneficiaryLoadingState() {
+  return `
+    <div class="p-12 flex items-center justify-center">
+      <div class="text-center">
+        <div class="w-8 h-8 border-4 border-[#714B67] border-t-transparent rounded-full animate-spin mx-auto"></div>
+        <p class="mt-3 text-xs text-slate-500">Loading beneficiaries...</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderBeneficiaryTable() {
+  const filteredData = applyClientSideBeneficiaryFilters(beneficiaryData);
+  const totalPages = Math.max(1, Math.ceil(beneficiaryTotalCount / BENEFICIARY_PAGE_SIZE));
+
+  if (filteredData.length === 0) {
+    return `
+      <div class="p-12 text-center">
+        <i class="fa-regular fa-users text-4xl text-slate-300 mb-3 block"></i>
+        <p class="text-sm font-semibold text-slate-500">No beneficiaries found</p>
+        <p class="text-xs text-slate-400 mt-1">Try adjusting your filters or search criteria.</p>
+      </div>
+      <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
+        <span class="text-[10px] text-slate-400">Page ${beneficiaryPage} of ${totalPages} · ${beneficiaryTotalCount} total</span>
+        <div class="flex items-center gap-1">
+          <button id="ben-page-prev" class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${beneficiaryPage <= 1 ? 'opacity-50 cursor-not-allowed' : ''}" ${beneficiaryPage <= 1 ? 'disabled' : ''}>
+            <i class="fa-solid fa-chevron-left"></i>
+          </button>
+          <button id="ben-page-next" class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${beneficiaryPage >= totalPages ? 'opacity-50 cursor-not-allowed' : ''}" ${beneficiaryPage >= totalPages ? 'disabled' : ''}>
+            <i class="fa-solid fa-chevron-right"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div id="beneficiaries-table-container" class="overflow-x-auto w-full"></div>
+    <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
+      <span class="text-[10px] text-slate-400">
+        Page ${beneficiaryPage} of ${totalPages} · ${beneficiaryTotalCount} total · Showing ${filteredData.length} filtered
+      </span>
+      <div class="flex items-center gap-1">
+        <button id="ben-page-prev" class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${beneficiaryPage <= 1 ? 'opacity-50 cursor-not-allowed' : ''}" ${beneficiaryPage <= 1 ? 'disabled' : ''}>
+          <i class="fa-solid fa-chevron-left"></i>
+        </button>
+        <button id="ben-page-next" class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${beneficiaryPage >= totalPages ? 'opacity-50 cursor-not-allowed' : ''}" ${beneficiaryPage >= totalPages ? 'disabled' : ''}>
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+      </div>
+    </div>`
+}
+
 // ─── INITIALIZE MODULE ─────────────────────────────────────────────────────
 
 export function initAllocationRequests() {
@@ -134,9 +818,8 @@ export function initAllocationRequests() {
 }
 // ─── CLEANUP FUNCTION ─────────────────────────────────────────────────────
 
-export function cleanupAllocationRequests() {
+ function cleanupAllocationRequests() {
   console.log('cleanupAllocationRequests: Cleaning up...');
-  
   if (storeUnsubscribe) {
     storeUnsubscribe();
     storeUnsubscribe = null;
@@ -151,9 +834,22 @@ export function cleanupAllocationRequests() {
   isFetchingUser = false;
 }
 
+
+
+function switchAllocationTab(tab) {
+  if (tab === activeTab) return;
+  activeTab = tab;
+  renderAllocationRequests();
+  
+  // Auto-fetch beneficiaries when switching to the Beneficiaries tab
+  if (tab === 'beneficiaries' && !isLoadingBeneficiaries && beneficiaryData.length === 0) {
+    fetchBeneficiaries();
+  }
+}
+
 // ─── RENDER ALLOCATION REQUESTS ──────────────────────────────────────────
 
-export function renderAllocationRequests() {
+ function renderAllocationRequests() {
   try {
     console.log('renderAllocationRequests: Starting...');
     
@@ -227,27 +923,45 @@ export function renderAllocationRequests() {
               <i class="fa-solid fa-plus"></i> File Allocation Request
             </button>
           </div>
-
-          <!-- Metrics Grid -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="metrics-grid">
-            ${renderMetrics()}
+          <!-- View Tabs (compact, icon + short label) -->
+          <div class="bg-white border border-[#E5E7EB] rounded-xl shadow-sm p-1.5 mb-6 inline-flex items-center gap-1">
+            <button id="tab-requests" class="tab-switch-btn flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold rounded-lg transition-all ${activeTab === 'requests' ? 'bg-[#714B67] text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}" data-tab="requests">
+              <i class="fa-regular fa-folder-open"></i> Requests
+            </button>
+            <button id="tab-beneficiaries" class="tab-switch-btn flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold rounded-lg transition-all ${activeTab === 'beneficiaries' ? 'bg-[#714B67] text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}" data-tab="beneficiaries">
+              <i class="fa-regular fa-users"></i> Beneficiaries
+            </button>
           </div>
 
-          <!-- Status Filter Buttons -->
-          <div class="bg-white border border-[#E5E7EB] rounded-xl shadow-sm p-4 mb-6">
-            <div class="flex items-center gap-2 flex-wrap" id="filter-container">
-              <button class="filter-btn px-3 py-1.5 bg-[#714B67]/10 text-[#714B67] font-semibold text-xs rounded-lg transition-all border border-[#714B67]/20 shadow-sm" data-filter="all">All Documents</button>
-              <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-sm" data-filter="active">Active Pipeline</button>
-              ${Object.keys(STATUS_MAP).map(status => `
-                <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-sm" data-filter="${status.toLowerCase()}">
-                  ${STATUS_MAP[status].label}
-                </button>
-              `).join('')}
+          <!-- REQUESTS PANEL -->
+          <div id="requests-tab-panel" class="${activeTab === 'requests' ? '' : 'hidden'}">
+
+            <!-- Metrics Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="metrics-grid">
+              ${renderMetrics()}
             </div>
+
+            <!-- Status Filter Buttons -->
+            <div class="bg-white border border-[#E5E7EB] rounded-xl shadow-sm p-4 mb-6">
+              <div class="flex items-center gap-2 flex-wrap" id="filter-container">
+                <button class="filter-btn px-3 py-1.5 bg-[#714B67]/10 text-[#714B67] font-semibold text-xs rounded-lg transition-all border border-[#714B67]/20 shadow-sm" data-filter="all">All Documents</button>
+                <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-sm" data-filter="active">Active Pipeline</button>
+                ${Object.keys(STATUS_MAP).map(status => `
+                  <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-sm" data-filter="${status.toLowerCase()}">
+                    ${STATUS_MAP[status].label}
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+
+            <!-- Request Cards Container -->
+            <div id="requests-cards-container"></div>
           </div>
 
-          <!-- Request Cards Container -->
-          <div id="requests-cards-container"></div>
+          <!-- BENEFICIARIES PANEL (sibling of the requests panel, not nested inside it) -->
+          <div id="beneficiaries-tab-panel" class="${activeTab === 'beneficiaries' ? '' : 'hidden'}">
+            <div id="beneficiaries-container"></div>
+          </div>
         </div>
       </div>
     `;
@@ -445,6 +1159,19 @@ export function renderAllocationRequests() {
     // ─── INIT ─────────────────────────────────────────────────────────────
 
     attachFilterListeners();
+    document.querySelectorAll('.tab-switch-btn').forEach(btn => {
+      btn.addEventListener('click', function () {
+        switchAllocationTab(this.dataset.tab);
+      });
+    });
+
+    if (activeTab === 'beneficiaries') {
+      renderBeneficiariesSection();
+      // Auto-fetch the first time the tab is shown (or after an explicit refresh cleared the data)
+      if (!isLoadingBeneficiaries && beneficiaryData.length === 0) {
+        fetchBeneficiaries();
+      }
+    }
     
     document.getElementById('btn-create-request')?.addEventListener('click', () => openRequestForm());
     
@@ -460,17 +1187,7 @@ export function renderAllocationRequests() {
   }
 }
 
-// ─── RETRY FUNCTION ──────────────────────────────────────────────────────
-
-window.retryRenderAllocationRequests = function() {
-  isFetchingUser = false;
-  isRendering = false;
-  if (renderTimeout) {
-    clearTimeout(renderTimeout);
-    renderTimeout = null;
-  }
-  initAllocationRequests(); // ✅ Call init, not render directly
-};
+// ─── RETRY FUNCTION ──────────────────────────────────────
 
   function getEmptyStateHTML(searchQuery) {
   return `
@@ -910,6 +1627,833 @@ window.retryRenderAllocationRequests = function() {
   `;
  }
 
+// ─── BENEFICIARIES TAB ──────────────────────────────────────────────────
+// A clean, professional table like the queue module with position, beneficiary name,
+// institution, rank, status, override, registered date, and 3-dot actions dropdown.
+
+function applyClientSideBeneficiaryFilters(items) {
+  if (!items || !Array.isArray(items)) return [];
+  
+  return items.filter(item => {
+    const individual = item.beneficiaryIndividual || {};
+    const rankCode = individual.currentRank?.code || '';
+    
+    if (beneficiaryFilters.rank && rankCode !== beneficiaryFilters.rank) return false;
+
+    if (beneficiaryFilters.requestInstitutionId) {
+      const reqInstId = item.requestingInstitution?.id;
+      if (reqInstId !== beneficiaryFilters.requestInstitutionId) return false;
+    }
+
+    if (beneficiaryFilters.beneficiaryInstitutionId) {
+      const benInstId = item.beneficiaryInstitution?.id;
+      if (benInstId !== beneficiaryFilters.beneficiaryInstitutionId) return false;
+    }
+
+    if (beneficiaryFilters.override) {
+      const isOverride = item.isOverrideQueue || false;
+      if (beneficiaryFilters.override === 'yes' && !isOverride) return false;
+      if (beneficiaryFilters.override === 'no' && isOverride) return false;
+    }
+
+    const status = (item.status || '').toLowerCase();
+    if (beneficiaryFilters.status && status !== beneficiaryFilters.status.toLowerCase()) return false;
+
+    const registeredAt = item.enteredWaitingListAt || item.createdAt;
+    if (beneficiaryFilters.dateFrom && registeredAt) {
+      if (new Date(registeredAt) < new Date(beneficiaryFilters.dateFrom)) return false;
+    }
+    if (beneficiaryFilters.dateTo && registeredAt) {
+      if (new Date(registeredAt) > new Date(beneficiaryFilters.dateTo + 'T23:59:59')) return false;
+    }
+
+    return true;
+  });
+}
+
+// ─── BENEFICIARIES UI RENDERING ─────────────────────────────────────────
+
+// function renderBeneficiariesSection() {
+//   const container = document.getElementById('beneficiaries-container');
+//   if (!container) return;
+
+//   container.innerHTML = `
+//     <div class="bg-white border border-[#E5E7EB] rounded-xl shadow-sm overflow-hidden">
+//       <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+//         <div class="flex items-center gap-2">
+//           <i class="fa-regular fa-users text-[#714B67]"></i>
+//           <h2 class="text-sm font-bold text-slate-800">Beneficiaries</h2>
+//         </div>
+//         <div class="flex items-center gap-3">
+//           <span class="text-xs text-slate-400 font-medium">${beneficiaryTotalCount} total</span>
+//           <button id="ben-refresh-btn" class="flex items-center gap-1 text-xs font-semibold text-[#714B67] hover:underline" ${isLoadingBeneficiaries ? 'disabled' : ''}>
+//             <i class="fa-solid fa-rotate ${isLoadingBeneficiaries ? 'animate-spin' : ''}"></i> Refresh
+//           </button>
+//         </div>
+//       </div>
+//       <div id="beneficiaries-table-wrap">
+//         ${isLoadingBeneficiaries ? renderBeneficiaryLoadingState() : renderBeneficiaryTable()}
+//       </div>
+//     </div>
+//   `;
+
+//   document.getElementById('ben-refresh-btn')?.addEventListener('click', () => {
+//     fetchBeneficiaries();
+//   });
+
+//   document.getElementById('ben-page-prev')?.addEventListener('click', () => {
+//     if (beneficiaryPage > 1) {
+//       beneficiaryPage--;
+//       fetchBeneficiaries();
+//     }
+//   });
+
+//   document.getElementById('ben-page-next')?.addEventListener('click', () => {
+//     const totalPages = Math.max(1, Math.ceil(beneficiaryTotalCount / BENEFICIARY_PAGE_SIZE));
+//     if (beneficiaryPage < totalPages) {
+//       beneficiaryPage++;
+//       fetchBeneficiaries();
+//     }
+//   });
+// }
+
+// function renderBeneficiaryLoadingState() {
+//   return `
+//     <div class="p-12 flex items-center justify-center">
+//       <div class="text-center">
+//         <div class="w-8 h-8 border-4 border-[#714B67] border-t-transparent rounded-full animate-spin mx-auto"></div>
+//         <p class="mt-3 text-xs text-slate-500">Loading beneficiaries...</p>
+//       </div>
+//     </div>
+//   `;
+// }
+
+// function renderBeneficiaryTable() {
+// const totalPages = Math.max(
+// 1,
+// Math.ceil(beneficiaryTotalCount / BENEFICIARY_PAGE_SIZE)
+// );
+
+// // Table container is rendered here.
+// // Table.render() will generate the actual table inside it.
+// const tableContainer = ` <div id="beneficiaries-table-container" class="overflow-x-auto w-full"></div>
+// <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
+//   <span class="text-[10px] text-slate-400">
+//     Page ${beneficiaryPage} of ${totalPages} · ${beneficiaryTotalCount} total
+//   </span>
+
+//   <div class="flex items-center gap-1">
+//     <button
+//       id="ben-page-prev"
+//       class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${
+//         beneficiaryPage <= 1
+//           ? 'opacity-50 cursor-not-allowed'
+//           : ''
+//       }"
+//       ${beneficiaryPage <= 1 ? 'disabled' : ''}
+//     >
+//       <i class="fa-solid fa-chevron-left"></i>
+//     </button>
+
+//     <button
+//       id="ben-page-next"
+//       class="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors ${
+//         beneficiaryPage >= totalPages
+//           ? 'opacity-50 cursor-not-allowed'
+//           : ''
+//       }"
+//       ${beneficiaryPage >= totalPages ? 'disabled' : ''}
+//     >
+//       <i class="fa-solid fa-chevron-right"></i>
+//     </button>
+//   </div>
+//  </div>`
+
+
+
+//   setTimeout(() => {
+//   renderBeneficiaryTableData(beneficiaryData);
+//   }, 0);
+
+//   return tableContainer;
+//  }
+
+// ─────────────────────────────────────────────────────────────
+// BENEFICIARY TABLE RENDER
+// Same structure as the queue module's renderTable()
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// BENEFICIARY TABLE RENDER - FIXED FOR API RESPONSE
+// ─────────────────────────────────────────────────────────────
+
+function renderBeneficiaryTableData(data) {
+  // Map the data to the format expected by the table
+  const mappedData = data.map((item, index) => {
+    const individual = item.beneficiaryIndividual || {};
+    const beneficiaryInst = item.beneficiaryInstitution || {};
+    const requestingInst = item.requestingInstitution || {};
+    
+    return {
+      // Position
+      position: item.waitingListPosition ?? ((beneficiaryPage - 1) * BENEFICIARY_PAGE_SIZE) + index + 1,
+      
+      // Beneficiary info
+      beneficiaryId: item.id,
+      beneficiaryName: item.beneficiaryName || getUserFullName(individual) || 'N/A',
+      
+      // Beneficiary Institution
+      beneficiaryInstitutionName: beneficiaryInst.name?.en || beneficiaryInst.name?.am || beneficiaryInst.shortName || 'N/A',
+      beneficiaryInstitutionCode: beneficiaryInst.code || 'N/A',
+      beneficiaryInstitutionType: beneficiaryInst.institutionType || 'N/A',
+      
+      // Requesting Institution
+      requestingInstitutionName: requestingInst.name?.en || requestingInst.name?.am || requestingInst.shortName || 'N/A',
+      requestingInstitutionCode: requestingInst.code || 'N/A',
+      requestingInstitutionTier: requestingInst.currentTier?.code || 'N/A',
+      requestingInstitutionTierPriority: requestingInst.currentTier?.allocationPriority ?? 'N/A',
+      requestingInstitutionTierName: requestingInst.currentTier?.name?.en || requestingInst.currentTier?.name?.am || 'N/A',
+      
+      // Rank
+      beneficiaryRank: individual.currentRank?.code || 'N/A',
+      beneficiaryRankPriority: individual.currentRank?.priorityLevel ?? 'N/A',
+      
+      // Status
+      status: item.status || 'pending_review',
+      
+      // Override
+      isOverrideQueue: item.isOverrideQueue || false,
+      overrideQueueReason: item.overrideQueueReason || '',
+      
+      // Registered date
+      registeredAt: item.enteredWaitingListAt || item.createdAt || null,
+      
+      // Letter reference
+      referenceNumber: item.letterReferenceNumber || 'N/A',
+      letterDate: item.letterDate || 'N/A',
+      
+      // Nationality
+      beneficiaryNationality: individual.nationality || 'N/A',
+      
+      // Phone
+      beneficiaryPhone: individual.phonePrimary || 'N/A',
+      
+      // Request status (workflow status)
+      requestStatus: item.requestStatus || 'N/A',
+      
+      // Allocation history
+      allocationHistoryCount: item.beneficiaryInstitution?.allocationHistoryCount ?? 0,
+      
+      // Priority breakdown (for the priority badges)
+      priorityBreakdown: {
+        isOverride: item.isOverrideQueue || false,
+        institution: {
+          tierPriority: requestingInst.currentTier?.allocationPriority ?? null,
+          allocationHistoryCount: item.beneficiaryInstitution?.allocationHistoryCount ?? 0
+        },
+        beneficiary: {
+          rankPriority: individual.currentRank?.priorityLevel ?? null
+        }
+      }
+    };
+  });
+
+  Table.render<any>({
+    containerId: 'beneficiaries-table-container',
+    loading: isLoadingBeneficiaries,
+    placeholderText: 'Search beneficiaries...',
+    columns: [
+      // ─── POSITION ──────────────────────────────────────────────────────
+      {
+        header: '#',
+        key: 'position',
+        sortable: true,
+        render: (item, index) => {
+          const position = item.position ?? ((beneficiaryPage - 1) * BENEFICIARY_PAGE_SIZE) + index + 1;
+          return `
+            <span class="inline-flex items-center justify-center w-7 h-7 bg-slate-100 text-slate-800 font-black rounded-lg text-xs border border-slate-200">
+              ${position}
+            </span>
+          `;
+        }
+      },
+
+      // ─── BENEFICIARY ──────────────────────────────────────────────────
+      {
+        header: 'Beneficiary',
+        key: 'beneficiaryName',
+        sortable: true,
+        render: (item) => {
+          const name = item.beneficiaryName || 'N/A';
+          const rank = item.beneficiaryRank || 'N/A';
+          const isOverride = item.isOverrideQueue || false;
+          const overrideReason = item.overrideQueueReason || 'This beneficiary has an override priority.';
+          const institutionName = item.beneficiaryInstitutionName || 'N/A';
+
+          return `
+            <div class="space-y-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-bold text-slate-800 text-sm">${name}</span>
+                ${rank !== 'N/A' ? `<span class="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[9px] font-medium rounded border border-blue-200">${rank}</span>` : ''}
+                ${isOverride ? `<span title="${overrideReason}" class="px-1.5 py-0.5 bg-rose-100 text-rose-700 text-[9px] font-bold rounded border border-rose-300 flex items-center gap-1"><i class="fa-solid fa-flag"></i> OVERRIDE</span>` : ''}
+              </div>
+              <p class="text-[10px] text-slate-500 flex items-center gap-1">
+                <i class="fa-solid fa-building text-slate-400 text-[9px]"></i>
+                ${institutionName}
+              </p>
+            </div>
+          `;
+        }
+      },
+
+      // ─── REQUESTING INSTITUTION ──────────────────────────────────────
+      {
+        header: 'Requesting Institution',
+        key: 'requestingInstitutionName',
+        sortable: true,
+        render: (item) => {
+          const reqInstName = item.requestingInstitutionName || 'N/A';
+          if (reqInstName === 'N/A') {
+            return `<span class="text-xs text-slate-400">N/A</span>`;
+          }
+          return `
+            <div class="space-y-0.5">
+              <p class="font-semibold text-slate-800 text-xs">${reqInstName}</p>
+              ${item.requestingInstitutionCode && item.requestingInstitutionCode !== 'N/A' ? `<p class="text-[9px] text-slate-400 font-mono">${item.requestingInstitutionCode}</p>` : ''}
+            </div>
+          `;
+        }
+      },
+
+      // ─── INSTITUTION TIER ────────────────────────────────────────────
+      {
+        header: 'Inst. Tier',
+        key: 'requestingInstitutionTier',
+        sortable: true,
+        render: (item) => {
+          const hasTier = item.requestingInstitutionTier && item.requestingInstitutionTier !== 'N/A';
+          if (!hasTier) {
+            return `<span class="text-xs text-slate-400">No tier</span>`;
+          }
+          return `
+            <div class="space-y-1">
+              <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-[10px] font-medium">
+                <i class="fa-solid fa-building-columns text-[9px]"></i>
+                ${item.requestingInstitutionTier}
+              </span>
+              ${item.requestingInstitutionTierPriority !== 'N/A' ? `<p class="text-[9px] text-slate-400">Priority: ${item.requestingInstitutionTierPriority}</p>` : ''}
+            </div>
+          `;
+        }
+      },
+
+      // ─── BENEFICIARY INSTITUTION ──────────────────────────────────────
+      {
+        header: 'Beneficiary Institution',
+        key: 'beneficiaryInstitutionName',
+        sortable: true,
+        render: (item) => {
+          const institutionName = item.beneficiaryInstitutionName || 'N/A';
+          const institutionCode = item.beneficiaryInstitutionCode || 'N/A';
+          const institutionType = item.beneficiaryInstitutionType || 'N/A';
+
+          if (institutionName === 'N/A') {
+            return `<span class="text-xs text-slate-400">No institution</span>`;
+          }
+
+          return `
+            <div class="space-y-0.5">
+              <p class="font-semibold text-slate-800 text-xs">${institutionName}</p>
+              ${institutionCode !== 'N/A' ? `<p class="text-[9px] text-slate-400 font-mono">${institutionCode}</p>` : ''}
+              ${institutionType !== 'N/A' ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded text-[9px]">${institutionType}</span>` : ''}
+            </div>
+          `;
+        }
+      },
+
+      // ─── RANK ─────────────────────────────────────────────────────────
+      {
+        header: 'Rank',
+        key: 'beneficiaryRank',
+        sortable: true,
+        render: (item) => {
+          const rank = item.beneficiaryRank || 'N/A';
+          const rankPriority = item.beneficiaryRankPriority ?? 'N/A';
+
+          if (rank === 'N/A') {
+            return `<span class="text-xs text-slate-400">No rank</span>`;
+          }
+
+          return `
+            <div class="space-y-1">
+              <div class="flex items-center gap-1.5">
+                <i class="fa-solid fa-medal text-blue-500 text-[10px]"></i>
+                <span class="font-semibold text-slate-700 text-xs">${rank}</span>
+              </div>
+              ${rankPriority !== 'N/A' ? `<p class="text-[9px] text-slate-400">Priority: ${rankPriority}</p>` : ''}
+            </div>
+          `;
+        }
+      },
+
+      // ─── STATUS ──────────────────────────────────────────────────────
+      {
+        header: 'Status',
+        key: 'status',
+        sortable: true,
+        render: (item) => {
+          const status = item.status || 'pending_review';
+          const statusInfo = getBeneficiaryStatusInfo(status);
+          return `
+            <div class="space-y-1">
+              <span class="px-2 py-0.5 ${statusInfo.color} border text-[10px] font-bold rounded-md block text-center cursor-help" title="${statusInfo.label}: ${BENEFICIARY_STATUS_LEGEND[status]?.description || ''}">
+                ${statusInfo.label}
+              </span>
+            </div>
+          `;
+        }
+      },
+
+      // ─── REQUEST STATUS (Workflow) ──────────────────────────────────
+      {
+        header: 'Request Status',
+        key: 'requestStatus',
+        sortable: true,
+        render: (item) => {
+          const status = item.requestStatus || 'N/A';
+          const statusInfo = getStatusInfo(status);
+          return `
+            <div class="space-y-1">
+              <span class="px-2 py-0.5 ${statusInfo.color} border text-[10px] font-bold rounded-md block text-center">
+                ${statusInfo.label}
+              </span>
+            </div>
+          `;
+        }
+      },
+
+      // ─── ALLOCATION HISTORY ──────────────────────────────────────────
+      {
+        header: 'History',
+        key: 'allocationHistoryCount',
+        sortable: true,
+        render: (item) => {
+          const count = item.allocationHistoryCount ?? 0;
+          return `
+            <div class="text-center">
+              <span class="inline-flex items-center justify-center w-8 h-8 bg-slate-100 text-slate-700 font-bold rounded-lg text-xs border border-slate-200">
+                ${count}
+              </span>
+              <p class="text-[9px] text-slate-400">allocations</p>
+            </div>
+          `;
+        }
+      },
+
+      // ─── OVERRIDE ────────────────────────────────────────────────────
+      {
+        header: 'Override',
+        key: 'isOverrideQueue',
+        sortable: true,
+        render: (item) => {
+          const isOverride = item.isOverrideQueue || false;
+          if (!isOverride) {
+            return `<span class="text-xs text-slate-400">—</span>`;
+          }
+          return `
+            <span title="${item.overrideQueueReason || 'Override priority'}" class="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-50 text-rose-700 border border-rose-200 rounded-md text-[10px] font-bold cursor-help">
+              <i class="fa-solid fa-flag text-[9px]"></i> Yes
+            </span>
+          `;
+        }
+      },
+
+      // ─── REGISTERED ──────────────────────────────────────────────────
+      {
+        header: 'Registered',
+        key: 'registeredAt',
+        sortable: true,
+        render: (item) => {
+          const registeredAt = item.registeredAt || item.enteredWaitingListAt || item.createdAt;
+          if (!registeredAt) {
+            return `<span class="text-xs text-slate-400">N/A</span>`;
+          }
+          const date = new Date(registeredAt);
+          if (isNaN(date.getTime())) {
+            return `<span class="text-xs text-slate-400">N/A</span>`;
+          }
+          return `
+            <div class="space-y-0.5">
+              <p class="text-xs font-medium text-slate-700">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+              <p class="text-[9px] text-slate-400">${date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</p>
+            </div>
+          `;
+        }
+      },
+
+      // ─── LETTER REFERENCE ────────────────────────────────────────────
+      {
+        header: 'Reference',
+        key: 'referenceNumber',
+        sortable: true,
+        render: (item) => `
+          <div class="space-y-0.5">
+            <p class="font-mono font-bold text-indigo-600 text-xs">${item.referenceNumber || 'N/A'}</p>
+            <p class="text-[9px] text-slate-400">${item.letterDate || 'N/A'}</p>
+          </div>
+        `
+      },
+
+      // ─── PRIORITY FACTORS ────────────────────────────────────────────
+      {
+        header: 'Priority',
+        key: 'priorityBreakdown',
+        render: (item) => {
+          const factors = [
+            { key: 'override', active: item.isOverrideQueue || false, label: 'OV', color: 'amber' },
+            { key: 'tier', active: item.requestingInstitutionTierPriority !== 'N/A' && item.requestingInstitutionTierPriority !== null, label: 'TI', color: 'purple' },
+            { key: 'history', active: item.allocationHistoryCount > 0, label: 'HI', color: 'teal' },
+            { key: 'rank', active: item.beneficiaryRankPriority !== 'N/A' && item.beneficiaryRankPriority !== null, label: 'RK', color: 'blue' },
+          ];
+
+          const activeCount = factors.filter(f => f.active).length;
+
+          const badges = factors.map(f => {
+            const isActive = f.active;
+            const badgeClass = isActive
+              ? `bg-${f.color}-50 text-${f.color}-700 border-${f.color}-200`
+              : `bg-slate-50 text-gray-400 border-gray-200`;
+
+            return `
+              <span class="w-6 h-6 rounded-md text-[9px] font-bold border flex items-center justify-center ${badgeClass} cursor-help" title="${f.label}: ${isActive ? 'Active' : 'Inactive'}">
+                ${f.label}
+              </span>
+            `;
+          }).join('');
+
+          return `
+            <div class="flex items-center gap-1.5">
+              <span class="text-[10px] font-bold text-slate-400 min-w-[20px]">${activeCount}/4</span>
+              <div class="flex gap-0.5">${badges}</div>
+            </div>
+          `;
+        }
+      },
+
+      // ─── ACTIONS ─────────────────────────────────────────────────────
+      {
+        header: 'Actions',
+        key: 'beneficiaryId',
+        render: (item) => {
+          const beneficiaryId = item.beneficiaryId || 'N/A';
+          const beneficiaryName = item.beneficiaryName || 'This beneficiary';
+          const position = item.position || 'N/A';
+          const status = (item.status || '').toLowerCase();
+
+          // Only show allocation actions for waiting_list beneficiaries
+          if (status === 'allocated') {
+            return `<span class="text-xs text-emerald-600 font-semibold block text-center"><i class="fa-solid fa-check-circle mr-1"></i>Allocated</span>`;
+          }
+          if (status === 'unauthorized_by_directive') {
+            return `<span class="text-xs text-rose-600 font-semibold block text-center"><i class="fa-solid fa-ban mr-1"></i>Rejected</span>`;
+          }
+          if (status !== 'waiting_list') {
+            return `<span class="text-xs text-slate-400 block text-center">Not in queue</span>`;
+          }
+
+          return `
+            <details class="dropdown-container relative">
+              <summary class="dropdown-trigger list-none cursor-pointer w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 transition-colors mx-auto">
+                <i class="fa-solid fa-ellipsis-vertical text-slate-500 text-sm"></i>
+              </summary>
+              <div class="dropdown-menu absolute right-0 mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-lg z-20 py-1">
+                <button data-action="allocate-beneficiary" data-beneficiary-id="${beneficiaryId}" data-beneficiary-name="${beneficiaryName}" data-position="${position}" class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-emerald-600 hover:bg-emerald-50 flex items-center gap-2">
+                  <i class="fa-solid fa-check-circle"></i> Allocate House
+                </button>
+                <button data-action="reject-beneficiary" data-beneficiary-id="${beneficiaryId}" data-beneficiary-name="${beneficiaryName}" class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2">
+                  <i class="fa-solid fa-ban"></i> Reject
+                </button>
+                <div class="border-t border-slate-100 my-1"></div>
+                ${item.isOverrideQueue ? `
+                  <button data-action="clear-override-beneficiary" data-beneficiary-id="${beneficiaryId}" data-beneficiary-name="${beneficiaryName}" class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-amber-600 hover:bg-amber-50 flex items-center gap-2">
+                    <i class="fa-solid fa-flag"></i> Clear Override
+                  </button>
+                ` : `
+                  <button data-action="set-override-beneficiary" data-beneficiary-id="${beneficiaryId}" data-beneficiary-name="${beneficiaryName}" data-position="${position}" class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-indigo-600 hover:bg-indigo-50 flex items-center gap-2">
+                    <i class="fa-solid fa-flag"></i> Set Override
+                  </button>
+                `}
+                <button data-action="explain-beneficiary" data-beneficiary-id="${beneficiaryId}" data-beneficiary-name="${beneficiaryName}" class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                  <i class="fa-solid fa-circle-info"></i> View Priority Explanation
+                </button>
+              </div>
+            </details>
+          `;
+        }
+      }
+    ],
+    data: mappedData || [],
+    emptyState: `
+      <div class="text-center py-12">
+        <i class="fa-regular fa-users text-4xl text-slate-300 mb-3 block"></i>
+        <p class="text-sm font-semibold text-slate-500">No beneficiaries found</p>
+        <p class="text-xs text-slate-400 mt-1">Beneficiaries will appear here once allocation requests are processed.</p>
+      </div>
+    `,
+    rowClassName: (item) => {
+      const status = (item.status || '').toLowerCase();
+      const isOverride = item.isOverrideQueue || false;
+      
+      if (isOverride) return 'bg-rose-50/30';
+      if (status === 'allocated') return 'bg-emerald-50/30';
+      if (status === 'unauthorized_by_directive') return 'bg-slate-50/50';
+      if (status === 'waiting_list') return 'bg-teal-50/30';
+      if (status === 'eligible') return 'bg-blue-50/30';
+      if (status === 'under_legal_revision') return 'bg-purple-50/30';
+      if (status === 'pending_review') return 'bg-amber-50/30';
+      return 'bg-slate-50/30';
+    }
+  });
+}
+
+// ─── BENEFICIARY ACTION HANDLERS ──────────────────────────────────────────
+
+// Handle beneficiary dropdown actions
+document.addEventListener('click', function(e) {
+  const target = e.target as HTMLElement;
+  
+  // Close dropdowns when clicking outside
+  if (!target.closest('.dropdown-container')) {
+    document.querySelectorAll('.dropdown-container[open]').forEach((details) => {
+      (details as HTMLDetailsElement).removeAttribute('open');
+    });
+  }
+  
+  // Handle dropdown item clicks
+  const dropdownItem = target.closest('.dropdown-item') as HTMLElement | null;
+  if (dropdownItem) {
+    const details = dropdownItem.closest('details');
+    details?.removeAttribute('open');
+    
+    const action = dropdownItem.getAttribute('data-action');
+    const beneficiaryId = dropdownItem.getAttribute('data-beneficiary-id');
+    const beneficiaryName = dropdownItem.getAttribute('data-beneficiary-name') || 'This beneficiary';
+    const position = dropdownItem.getAttribute('data-position') || 'N/A';
+    
+    if (!beneficiaryId || beneficiaryId === 'N/A') return;
+    
+    switch (action) {
+      case 'allocate-beneficiary':
+        handleBeneficiaryAllocate(beneficiaryId);
+        break;
+      case 'reject-beneficiary':
+        handleBeneficiaryRejectAction(beneficiaryId, beneficiaryName);
+        break;
+      case 'set-override-beneficiary':
+        handleBeneficiarySetOverride(beneficiaryId, beneficiaryName, position);
+        break;
+      case 'clear-override-beneficiary':
+        handleBeneficiaryClearOverride(beneficiaryId, beneficiaryName);
+        break;
+      case 'explain-beneficiary':
+        handleBeneficiaryExplanation(beneficiaryId);
+        break;
+    }
+  }
+});
+
+function handleBeneficiaryAllocate(beneficiaryId: string) {
+  Modal.open({
+    title: 'Confirm Housing Allocation',
+    content: `
+      <div class="space-y-4">
+        <p class="text-sm text-slate-600">Are you sure you want to approve and allocate state housing for this beneficiary?</p>
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">House ID <span class="text-rose-500">*</span></label>
+          <input
+            id="ben-allocate-house-id"
+            type="text"
+            placeholder="Enter house ID..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+          />
+        </div>
+        <p class="text-xs text-slate-400 mt-1">This will permanently mark this beneficiary as allocated and remove them from the active priority queue.</p>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Approve & Allocate',
+    onConfirm: async (modalEl) => {
+      const houseId = (modalEl.querySelector('#ben-allocate-house-id') as HTMLInputElement)?.value;
+      if (!houseId || !houseId.trim()) {
+        Toast.error('House ID is required.');
+        return;
+      }
+      try {
+        await store.apiService.post(`/house-allocation-queue/${beneficiaryId}/allocate`, {
+          houseId: houseId.trim()
+        });
+        Toast.success('Housing successfully allocated.');
+        // Refresh the beneficiary list
+        fetchBeneficiaries();
+        // Also refresh queue data if needed
+        if ((window as any).__reloadQueueTable) {
+          await (window as any).__reloadQueueTable();
+        }
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to allocate housing. Please try again.');
+      }
+    }
+  });
+}
+
+function handleBeneficiaryRejectAction(beneficiaryId: string, beneficiaryName: string) {
+  Modal.open({
+    title: `Reject Beneficiary: ${beneficiaryName}`,
+    content: `
+      <div class="space-y-4">
+        <div class="p-3 bg-rose-50 border border-rose-150 rounded-lg text-rose-800 text-xs font-semibold">
+          Rejecting ${beneficiaryName} from waiting list
+        </div>
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">Rejection Reason <span class="text-rose-500">*</span></label>
+          <textarea
+            id="ben-reject-reason"
+            rows="3"
+            required
+            placeholder="State the official reason for rejecting this beneficiary..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden"
+          ></textarea>
+        </div>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Submit Rejection',
+    onConfirm: async (modalEl) => {
+      const reason = (modalEl.querySelector('#ben-reject-reason') as HTMLTextAreaElement)?.value;
+      if (!reason || !reason.trim()) {
+        Toast.error('A rejection reason must be specified.');
+        return;
+      }
+
+      try {
+        await store.apiService.patch(`/house-allocation-requests/beneficiaries/${beneficiaryId}/status`, {
+          status: 'unauthorized_by_directive',
+          reason: reason.trim()
+        });
+        Toast.success(`Beneficiary ${beneficiaryName} rejected and removed from queue.`);
+        fetchBeneficiaries();
+        if ((window as any).__reloadQueueTable) {
+          await (window as any).__reloadQueueTable();
+        }
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to reject beneficiary. Please try again.');
+      }
+    }
+  });
+}
+
+function handleBeneficiarySetOverride(beneficiaryId: string, beneficiaryName: string, currentPosition: string) {
+  Modal.open({
+    title: 'Manual Queue Override',
+    content: `
+      <div class="space-y-4">
+        <div class="p-3 bg-amber-50 border border-amber-150 rounded-lg text-xs text-amber-800">
+          <i class="fa-solid fa-circle-info mr-1"></i>
+          This will move <strong>${beneficiaryName}</strong> to the front of the queue (position #1).
+          The standard priority rules (tier / history / rank / FIFO) will be bypassed.
+        </div>
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">
+            Override Reason <span class="text-rose-500">*</span>
+          </label>
+          <textarea
+            id="ben-override-reason"
+            rows="3"
+            required
+            placeholder="State the official justification for overriding the standard queue rules..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-purple-500"
+          ></textarea>
+          <p class="text-[10px] text-slate-400 mt-1">Mandatory — permanently recorded for audit purposes.</p>
+        </div>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Confirm Override',
+    onConfirm: async (modalEl) => {
+      const reason = (modalEl.querySelector('#ben-override-reason') as HTMLTextAreaElement)?.value;
+      if (!reason || !reason.trim()) {
+        Toast.error('A reason is required to set a queue override.');
+        return;
+      }
+
+      try {
+        const result: any = await store.apiService.patch(`/house-allocation-queue/${beneficiaryId}/override`, {
+          reason: reason.trim(),
+        });
+        Toast.success(result?.message || `${beneficiaryName} moved to the front of the queue.`);
+        fetchBeneficiaries();
+        if ((window as any).__reloadQueueTable) {
+          await (window as any).__reloadQueueTable();
+        }
+      } catch (error: any) {
+        console.error('Override failed:', error);
+        Toast.error(error?.response?.message || error?.message || 'Failed to set override. Please try again.');
+      }
+    }
+  });
+}
+
+function handleBeneficiaryClearOverride(beneficiaryId: string, beneficiaryName: string) {
+  Modal.open({
+    title: 'Clear Manual Override',
+    content: `
+      <div class="space-y-4">
+        <div class="p-3 bg-slate-50 border border-slate-150 rounded-lg text-xs text-slate-600">
+          <strong>${beneficiaryName}</strong> currently has an active manual override. Clearing it
+          returns them to whatever position the standard tier / history / rank / FIFO hierarchy gives them.
+        </div>
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">
+            Reason for Clearing <span class="text-rose-500">*</span>
+          </label>
+          <textarea
+            id="ben-clear-reason"
+            rows="3"
+            required
+            placeholder="State the reason for removing this override..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+          ></textarea>
+        </div>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Clear Override',
+    onConfirm: async (modalEl) => {
+      const reason = (modalEl.querySelector('#ben-clear-reason') as HTMLTextAreaElement)?.value;
+      if (!reason || !reason.trim()) {
+        Toast.error('A reason is required to clear a queue override.');
+        return;
+      }
+      try {
+        const result: any = await store.apiService.patch(`/house-allocation-queue/${beneficiaryId}/override/clear`, {
+          reason: reason.trim(),
+        });
+        Toast.success(result?.message || `Override cleared for ${beneficiaryName}.`);
+        fetchBeneficiaries();
+        if ((window as any).__reloadQueueTable) {
+          await (window as any).__reloadQueueTable();
+        }
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to clear override. Please try again.');
+      }
+    }
+  });
+}
+
+function handleBeneficiaryExplanation(beneficiaryId: string) {
+  // Reuse the existing explanation handler from the queue module
+  handleShowExplanation(beneficiaryId);
+}
 
  function viewRequestDetails(id) {
   console.log('viewRequestDetails called with id:', id);
@@ -1020,7 +2564,7 @@ window.retryRenderAllocationRequests = function() {
  }
 
 
- function renderRequestDetailView(item) {
+  function renderRequestDetailView(item) {
   console.log('renderRequestDetailView called with item:', item);
   
   const contentArea = document.getElementById('main-content-area');
@@ -1132,7 +2676,7 @@ window.retryRenderAllocationRequests = function() {
       </div>
     `;
   }
- }
+  }
 
  function renderBeneficiaryDetails(beneficiaries, requestStatus, requestId) {
   if (!beneficiaries || beneficiaries.length === 0) {
@@ -2710,19 +4254,17 @@ function openAddBeneficiaryModal(requestId) {
     return;
   }
 
-  let formState = {
+   let formState = {
     beneficiaryIndividualId: '',
     beneficiaryInstitutionId: '',
     userSearch: '',
-    userPage: 1,
-    userPageSize: 10,
     filteredUsers: [],
     totalUsers: 0
   };
 
   let modalInstance = null;
 
-  function buildInstitutionOptions(selectedId) {
+   function buildInstitutionOptions(selectedId) {
     let html = '<option value="">-- Select Institution --</option>';
     if (store.institutions && Array.isArray(store.institutions)) {
       store.institutions.forEach(inst => {
@@ -2748,14 +4290,14 @@ function openAddBeneficiaryModal(requestId) {
 
     filtered.sort((a, b) => getUserFullName(a).localeCompare(getUserFullName(b)));
     formState.totalUsers = filtered.length;
-    
-    const start = (formState.userPage - 1) * formState.userPageSize;
-    const paginated = filtered.slice(start, start + formState.userPageSize);
-    formState.filteredUsers = paginated;
-    return paginated;
+    formState.filteredUsers = filtered;
+    return filtered;
   }
 
   function buildUserOptions(users) {
+    if (!users || users.length === 0) {
+      return '<option value="">-- No users found --</option>';
+    }
     return users.map(user => {
       const name = getUserFullName(user);
       const userId = user.id || user.userId || '';
@@ -3059,16 +4601,23 @@ function openAddBeneficiaryModal(requestId) {
 
 // ─── OPEN REQUEST FORM ──────────────────────────────────────────────────
 
+
 function openRequestForm(id) {
   const isEdit = !!id;
   const item = isEdit ? store.allocationRequests.find(r => r.id === id) : null;
+  
+  function generateReferenceNumber() {
+    const year = new Date().getFullYear();
+    const randomDigits = String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
+    return `HAR-${year}-${randomDigits}`;
+  }
   
   const formState = {
     step: 1,
     totalSteps: 3,
     data: {
       letterReferenceNumber: !isEdit 
-        ? 'HAR-' + new Date().getFullYear() + '-' + String((store.allocationRequests?.length || 0) + 1).padStart(6, '0')
+        ? generateReferenceNumber() 
         : item?.letterReferenceNumber || '',
       letterDate: item?.letterDate || new Date().toISOString().split('T')[0],
       requestingInstitutionId: item?.requestingInstitution?.id || '',
@@ -3079,8 +4628,6 @@ function openRequestForm(id) {
       beneficiaryInstitutionId: b.beneficiaryInstitution?.id || b.institution?.id || ''
     })) || [],
     userSearch: '',
-    userPage: 1,
-    userPageSize: 10,
     filteredUsers: [],
     totalUsers: 0
   };
@@ -3098,6 +4645,7 @@ function openRequestForm(id) {
     return html;
   }
 
+  // ✅ FIXED: Returns ALL users filtered by search (no pagination)
   function getFilteredUsers() {
     let users = store.userExtensions || [];
     const search = formState.userSearch.toLowerCase().trim();
@@ -3113,14 +4661,15 @@ function openRequestForm(id) {
 
     filtered.sort((a, b) => getUserFullName(a).localeCompare(getUserFullName(b)));
     formState.totalUsers = filtered.length;
-    
-    const start = (formState.userPage - 1) * formState.userPageSize;
-    const paginated = filtered.slice(start, start + formState.userPageSize);
-    formState.filteredUsers = paginated;
-    return paginated;
+    formState.filteredUsers = filtered;
+    return filtered;
   }
 
+  // ✅ Build user options from ALL users
   function buildUserOptions(users) {
+    if (!users || users.length === 0) {
+      return '<option value="">-- No users found --</option>';
+    }
     return users.map(user => {
       const name = getUserFullName(user);
       const userId = user.id || user.userId || '';
@@ -3226,9 +4775,9 @@ function openRequestForm(id) {
     `;
   }
 
+  // ✅ FIXED: Step 2 - Shows ALL users with search (no pagination)
   function renderStep2() {
     const filteredUsers = getFilteredUsers();
-    const totalPages = Math.ceil(formState.totalUsers / formState.userPageSize);
     const benInstOptions = buildInstitutionOptions();
     
     return `
@@ -3257,20 +4806,10 @@ function openRequestForm(id) {
                   <i class="fa-solid fa-plus mr-1"></i> Create
                 </button>
               </div>
-              ${totalPages > 1 ? `
-                <div class="flex items-center justify-between mt-2 gap-2">
-                  <div class="text-[10px] text-slate-400">
-                    Showing ${(formState.userPage - 1) * formState.userPageSize + 1} - ${Math.min(formState.userPage * formState.userPageSize, formState.totalUsers)} of ${formState.totalUsers}
-                  </div>
-                  <div class="flex gap-1">
-                    <button id="user-page-prev" class="px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-200 rounded transition-colors ${formState.userPage <= 1 ? 'opacity-50 cursor-not-allowed' : ''}">
-                      <i class="fa-solid fa-chevron-left"></i>
-                    </button>
-                    <span class="text-[10px] text-slate-500 px-2 py-0.5">${formState.userPage}/${totalPages}</span>
-                    <button id="user-page-next" class="px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-200 rounded transition-colors ${formState.userPage >= totalPages ? 'opacity-50 cursor-not-allowed' : ''}">
-                      <i class="fa-solid fa-chevron-right"></i>
-                    </button>
-                  </div>
+              ${formState.totalUsers > 0 ? `
+                <div class="text-[10px] text-slate-400 mt-1">
+                  Showing ${formState.totalUsers} user${formState.totalUsers > 1 ? 's' : ''} 
+                  ${formState.userSearch ? `matching "${formState.userSearch}"` : ''}
                 </div>
               ` : ''}
             </div>
@@ -3305,7 +4844,7 @@ function openRequestForm(id) {
     `;
   }
 
-    function renderStep3() {
+  function renderStep3() {
     const d = formState.data;
     const inst = store.institutions.find(i => i.id === d.requestingInstitutionId);
     const instName = inst ? getInstitutionName(inst) : 'Not selected';
@@ -3374,7 +4913,6 @@ function openRequestForm(id) {
     `;
   }
 
- 
   function renderStep() {
     const steps = [renderStep1, renderStep2, renderStep3];
     const stepHtml = steps[formState.step - 1]();
@@ -3446,6 +4984,21 @@ function openRequestForm(id) {
       submitRequest();
     });
 
+    // ✅ FIXED: Search listener - updates the dropdown in real-time
+    const searchInput = document.getElementById('beneficiary-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', function() {
+        formState.userSearch = this.value;
+        // Re-render only step 2
+        const stepHtml = renderStep2();
+        const contentEl = document.querySelector('.tab-content.block');
+        if (contentEl) {
+          contentEl.innerHTML = stepHtml;
+          attachStep2Listeners();
+        }
+      });
+    }
+
     document.getElementById('btn-create-requesting-institution')?.addEventListener('click', function() {
       saveStepData();
       if (typeof openInstitutionForm === 'function') {
@@ -3513,42 +5066,6 @@ function openRequestForm(id) {
       }
     });
 
-    document.getElementById('beneficiary-search')?.addEventListener('input', function() {
-      formState.userSearch = this.value;
-      formState.userPage = 1;
-      const stepHtml = renderStep2();
-      const contentEl = document.querySelector('.tab-content.block');
-      if (contentEl) {
-        contentEl.innerHTML = stepHtml;
-        attachStep2Listeners();
-      }
-    });
-
-    document.getElementById('user-page-prev')?.addEventListener('click', () => {
-      if (formState.userPage > 1) {
-        formState.userPage--;
-        const stepHtml = renderStep2();
-        const contentEl = document.querySelector('.tab-content.block');
-        if (contentEl) {
-          contentEl.innerHTML = stepHtml;
-          attachStep2Listeners();
-        }
-      }
-    });
-
-    document.getElementById('user-page-next')?.addEventListener('click', () => {
-      const totalPages = Math.ceil(formState.totalUsers / formState.userPageSize);
-      if (formState.userPage < totalPages) {
-        formState.userPage++;
-        const stepHtml = renderStep2();
-        const contentEl = document.querySelector('.tab-content.block');
-        if (contentEl) {
-          contentEl.innerHTML = stepHtml;
-          attachStep2Listeners();
-        }
-      }
-    });
-
     document.getElementById('add-beneficiary-btn')?.addEventListener('click', () => {
       const userId = document.getElementById('beneficiary-user')?.value || '';
       const institutionId = document.getElementById('beneficiary-institution')?.value || '';
@@ -3590,42 +5107,20 @@ function openRequestForm(id) {
     });
   }
 
+  // ✅ FIXED: Step 2 listeners (no pagination)
   function attachStep2Listeners() {
-    document.getElementById('beneficiary-search')?.addEventListener('input', function() {
-      formState.userSearch = this.value;
-      formState.userPage = 1;
-      const stepHtml = renderStep2();
-      const contentEl = document.querySelector('.tab-content.block');
-      if (contentEl) {
-        contentEl.innerHTML = stepHtml;
-        attachStep2Listeners();
-      }
-    });
-
-    document.getElementById('user-page-prev')?.addEventListener('click', () => {
-      if (formState.userPage > 1) {
-        formState.userPage--;
+    const searchInput = document.getElementById('beneficiary-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', function() {
+        formState.userSearch = this.value;
         const stepHtml = renderStep2();
         const contentEl = document.querySelector('.tab-content.block');
         if (contentEl) {
           contentEl.innerHTML = stepHtml;
           attachStep2Listeners();
         }
-      }
-    });
-
-    document.getElementById('user-page-next')?.addEventListener('click', () => {
-      const totalPages = Math.ceil(formState.totalUsers / formState.userPageSize);
-      if (formState.userPage < totalPages) {
-        formState.userPage++;
-        const stepHtml = renderStep2();
-        const contentEl = document.querySelector('.tab-content.block');
-        if (contentEl) {
-          contentEl.innerHTML = stepHtml;
-          attachStep2Listeners();
-        }
-      }
-    });
+      });
+    }
 
     document.getElementById('add-beneficiary-btn')?.addEventListener('click', () => {
       const userId = document.getElementById('beneficiary-user')?.value || '';
@@ -3665,6 +5160,51 @@ function openRequestForm(id) {
           renderStep();
         }
       });
+    });
+
+    // ✅ FIXED: Add Create User button listener
+    document.getElementById('btn-create-beneficiary-individual')?.addEventListener('click', function() {
+      saveStepData();
+      if (typeof openExtensionForm === 'function') {
+        const currentModal = modalInstance;
+        
+        openExtensionForm(null, function(newUserId) {
+          if (newUserId) {
+            store.syncWithBackend(true).then(function() {
+              if (currentModal && typeof currentModal.close === 'function') {
+                currentModal.close();
+              }
+              renderStep();
+              Toast.success('User created! You can now select them as a beneficiary.');
+            });
+          }
+        });
+      } else {
+        window.location.hash = 'user-extensions';
+        Toast.info('Please create a user in the User Extensions page, then return.');
+      }
+    });
+
+    document.getElementById('btn-create-beneficiary-institution')?.addEventListener('click', function() {
+      saveStepData();
+      if (typeof openInstitutionForm === 'function') {
+        const currentModal = modalInstance;
+        
+        openInstitutionForm(null, function(newInstitutionId) {
+          if (newInstitutionId) {
+            store.syncWithBackend(true).then(function() {
+              if (currentModal && typeof currentModal.close === 'function') {
+                currentModal.close();
+              }
+              renderStep();
+              Toast.success('Institution created! You can now select it as a beneficiary institution.');
+            });
+          }
+        });
+      } else {
+        window.location.hash = 'institutions';
+        Toast.info('Please create an institution in the Institutions page, then return.');
+      }
     });
   }
 
@@ -3694,77 +5234,74 @@ function openRequestForm(id) {
     if (letterDateEl) d.letterDate = letterDateEl.value;
     if (registeredAtEl) d.registeredAt = registeredAtEl.value;
   }
-function submitRequest() {
-  const d = formState.data;
-if (modalInstance) modalInstance.close(); 
-  const payload = {
-    letterReferenceNumber: d.letterReferenceNumber,
-    letterDate: d.letterDate,
-    requestingInstitutionId: d.requestingInstitutionId,
-    registeredAt: d.registeredAt ? new Date(d.registeredAt).toISOString() : null,
-    beneficiaries: formState.selectedBeneficiaries,
-    isDraft: true, // ✅ Always save as draft first
-     directiveCompliance: {
-      isCompliant: true, // Always true for now
-      note: 'Directive compliance verified - all beneficiaries are eligible', // Required
-      notedBy: store.currentUser?.id || '00000000-0000-0000-0000-000000000001' // Current user ID
-    }
-  };
 
-  // ✅ Use workflowActions.createDraft to save as draft
-  workflowActions.createDraft(payload)
-    .then((response) => {
-      // ✅ Check if we got a response with the draft ID
-      const draftId = response.id || response.data?.id;
-      
-      if (draftId) {
-        Toast.success('Draft saved successfully.');
-        // ✅ Close modal and refresh
-        if (modalInstance) modalInstance.close();
-        store.syncWithBackend(true).then(renderAllocationRequests);
-        
-        // ✅ Optionally, ask user if they want to submit now
-        Modal.open({
-          title: 'Draft Saved',
-          content: `
-            <div class="space-y-4">
-              <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
-                <p class="text-xs text-emerald-700 flex items-center gap-2">
-                  <i class="fa-regular fa-circle-check"></i>
-                  <span>Your draft has been saved successfully!</span>
-                </p>
-                <p class="text-xs text-emerald-600 mt-1">Reference: <strong>${d.letterReferenceNumber}</strong></p>
-              </div>
-              <p class="text-sm text-slate-600">Would you like to submit this draft for review now?</p>
-            </div>
-          `,
-          confirmText: 'Submit for Review',
-          cancelText: 'Continue Editing',
-          onConfirm: function() {
-            // ✅ Submit the draft
-            workflowActions.submitDraft(draftId)
-              .then(() => {
-                Toast.success('Draft submitted for review!');
-                store.syncWithBackend(true).then(renderAllocationRequests);
-              })
-              .catch(error => {
-                console.error('Error submitting draft:', error);
-                Toast.error('Failed to submit draft. You can submit it later from the list.');
-              });
-          }
-        });
-      } else {
-        Toast.warning('Draft created but no ID returned. Please check the request list.');
-        if (modalInstance) modalInstance.close();
-        store.syncWithBackend(true).then(renderAllocationRequests);
+  function submitRequest() {
+    const d = formState.data;
+    if (modalInstance) modalInstance.close(); 
+
+    const payload = {
+      letterReferenceNumber: d.letterReferenceNumber,
+      letterDate: d.letterDate,
+      requestingInstitutionId: d.requestingInstitutionId,
+      registeredAt: d.registeredAt ? new Date(d.registeredAt).toISOString() : null,
+      beneficiaries: formState.selectedBeneficiaries,
+      isDraft: true,
+      directiveCompliance: {
+        isCompliant: true,
+        note: 'Directive compliance verified - all beneficiaries are eligible',
+        notedBy: store.currentUser?.id || '00000000-0000-0000-0000-000000000001'
       }
-    })
-    .catch(error => {
-      console.error('Error creating draft:', error);
-      const message = error.response?.data?.message || 'Failed to create draft.';
-      Toast.error(Array.isArray(message) ? message.join(', ') : message);
-    });
-}
+    };
+
+    workflowActions.createDraft(payload)
+      .then((response) => {
+        const draftId = response.id || response.data?.id;
+        
+        if (draftId) {
+          Toast.success('Draft saved successfully.');
+          if (modalInstance) modalInstance.close();
+          store.syncWithBackend(true).then(renderAllocationRequests);
+          
+          Modal.open({
+            title: 'Draft Saved',
+            content: `
+              <div class="space-y-4">
+                <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  <p class="text-xs text-emerald-700 flex items-center gap-2">
+                    <i class="fa-regular fa-circle-check"></i>
+                    <span>Your draft has been saved successfully!</span>
+                  </p>
+                  <p class="text-xs text-emerald-600 mt-1">Reference: <strong>${d.letterReferenceNumber}</strong></p>
+                </div>
+                <p class="text-sm text-slate-600">Would you like to submit this draft for review now?</p>
+              </div>
+            `,
+            confirmText: 'Submit for Review',
+            cancelText: 'Continue Editing',
+            onConfirm: function() {
+              workflowActions.submitDraft(draftId)
+                .then(() => {
+                  Toast.success('Draft submitted for review!');
+                  store.syncWithBackend(true).then(renderAllocationRequests);
+                })
+                .catch(error => {
+                  console.error('Error submitting draft:', error);
+                  Toast.error('Failed to submit draft. You can submit it later from the list.');
+                });
+            }
+          });
+        } else {
+          Toast.warning('Draft created but no ID returned. Please check the request list.');
+          if (modalInstance) modalInstance.close();
+          store.syncWithBackend(true).then(renderAllocationRequests);
+        }
+      })
+      .catch(error => {
+        console.error('Error creating draft:', error);
+        const message = error.response?.data?.message || 'Failed to create draft.';
+        Toast.error(Array.isArray(message) ? message.join(', ') : message);
+      });
+  }
 
   if (isEdit && item?.beneficiaries) {
     formState.selectedBeneficiaries = item.beneficiaries.map(b => ({
@@ -4212,6 +5749,11 @@ function openBeneficiaryDecisionModal(requestId, role) {
     return;
   }
   
+  // ✅ Get the decision field for this role
+  const decisionField = role === 'deputy' ? 'deputyCeoDecision' :
+                        role === 'director' ? 'directorDecision' :
+                        role === 'team_leader' ? 'teamLeaderDecision' : '';
+  
   // ✅ Decision options with lowercase values
   const decisionOptions = [
     { value: 'allowed', label: '✅ Allowed', requiresComment: false },
@@ -4224,26 +5766,25 @@ function openBeneficiaryDecisionModal(requestId, role) {
       <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
         <p class="text-xs text-blue-700 flex items-center gap-2">
           <i class="fa-regular fa-circle-info"></i>
-          <span>Review each beneficiary and make a decision. All beneficiaries must be reviewed before proceeding.</span>
+          <span>Review each beneficiary and make a decision. <strong>All ${beneficiaries.length} beneficiaries</strong> must be reviewed before proceeding.</span>
         </p>
       </div>
       
       <div class="max-h-[400px] overflow-y-auto space-y-3">
   `;
   
-  beneficiaries.forEach((ben, index) => {
+  // ✅ Show ALL beneficiaries in the modal (including already reviewed)
+  for (let index = 0; index < beneficiaries.length; index++) {
+    const ben = beneficiaries[index];
     const individual = ben.beneficiaryIndividual || ben.individual || null;
     const name = individual ? getUserFullName(individual) : 'Unknown Beneficiary';
     const institution = ben.beneficiaryInstitution || ben.institution || null;
     const instName = institution ? getInstitutionName(institution) : 'N/A';
-    const currentStatus = ben.status || 'pending_review';
-    const statusInfo = getBeneficiaryStatusInfo(currentStatus);
+    const benStatus = ben.status || 'pending_review';
+    const statusInfo = getBeneficiaryStatusInfo(benStatus);
     
-    // Get the appropriate decision field for this role
-    const decisionField = role === 'deputy' ? 'deputyCeoDecision' :
-                          role === 'director' ? 'directorDecision' :
-                          role === 'team_leader' ? 'teamLeaderDecision' : '';
     const currentDecision = ben[decisionField] || '';
+    const isAlreadyReviewed = currentDecision !== '' && currentDecision !== null && currentDecision !== undefined;
     
     modalContent += `
       <div class="border border-slate-200 rounded-lg p-3 bg-white">
@@ -4258,25 +5799,35 @@ function openBeneficiaryDecisionModal(requestId, role) {
         </div>
         <div>
           <label class="block text-[10px] font-semibold uppercase text-slate-500 tracking-wider mb-1">Decision for ${name}</label>
-          <select id="ben-decision-${ben.id}" class="ben-decision-select w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-1 focus:ring-[#714B67]" data-beneficiary-id="${ben.id}" data-index="${index}">
-            <option value="">-- Select Decision --</option>
-            ${decisionOptions.map(opt => `
-              <option value="${opt.value}" ${currentDecision === opt.value ? 'selected' : ''}>
-                ${opt.label}
-              </option>
-            `).join('')}
-          </select>
-        </div>
-        <div class="mt-2 comment-container" id="comment-container-${ben.id}" style="display: ${currentDecision !== 'allowed' && currentDecision !== '' ? 'block' : 'none'}">
-          <label class="block text-[10px] font-semibold uppercase text-slate-500 tracking-wider mb-1">
-            Comment <span class="text-rose-500">*</span>
-          </label>
-          <textarea id="ben-comment-${ben.id}" class="ben-comment-textarea w-full px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-1 focus:ring-[#714B67]" rows="2" placeholder="Please provide a reason for this decision..." data-beneficiary-id="${ben.id}">${ben[decisionField + 'Comment'] || ''}</textarea>
-          <p class="text-[10px] text-rose-500 mt-1 hidden" id="comment-warning-${ben.id}">⚠️ Comment is required for this decision</p>
+          ${isAlreadyReviewed ? `
+            <div class="flex items-center gap-2 p-2 bg-slate-50 rounded-lg border border-slate-200">
+              <span class="text-xs font-semibold text-slate-700">Already reviewed:</span>
+              <span class="text-xs font-bold ${currentDecision === 'allowed' ? 'text-emerald-600' : currentDecision === 'legal_revision_required' ? 'text-amber-600' : 'text-rose-600'}">
+                ${decisionOptions.find(opt => opt.value === currentDecision)?.label || currentDecision}
+              </span>
+              ${ben[decisionField + 'Comment'] ? `<span class="text-xs text-slate-500">- ${ben[decisionField + 'Comment']}</span>` : ''}
+            </div>
+          ` : `
+            <select id="ben-decision-${ben.id}" class="ben-decision-select w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-1 focus:ring-[#714B67]" data-beneficiary-id="${ben.id}" data-index="${index}">
+              <option value="">-- Select Decision --</option>
+              ${decisionOptions.map(opt => `
+                <option value="${opt.value}" ${currentDecision === opt.value ? 'selected' : ''}>
+                  ${opt.label}
+                </option>
+              `).join('')}
+            </select>
+            <div class="mt-2 comment-container" id="comment-container-${ben.id}" style="display: ${currentDecision !== 'allowed' && currentDecision !== '' ? 'block' : 'none'}">
+              <label class="block text-[10px] font-semibold uppercase text-slate-500 tracking-wider mb-1">
+                Comment <span class="text-rose-500">*</span>
+              </label>
+              <textarea id="ben-comment-${ben.id}" class="ben-comment-textarea w-full px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-1 focus:ring-[#714B67]" rows="2" placeholder="Please provide a reason for this decision..." data-beneficiary-id="${ben.id}">${ben[decisionField + 'Comment'] || ''}</textarea>
+              <p class="text-[10px] text-rose-500 mt-1 hidden" id="comment-warning-${ben.id}">⚠️ Comment is required for this decision</p>
+            </div>
+          `}
         </div>
       </div>
     `;
-  });
+  }
   
   modalContent += `
       </div>
@@ -4284,36 +5835,54 @@ function openBeneficiaryDecisionModal(requestId, role) {
   `;
   
   Modal.open({
-    title: `${roleLabel} Review - Beneficiary Decisions`,
+    title: `${roleLabel} Review - Beneficiary Decisions (${beneficiaries.length} beneficiaries)`,
     content: modalContent,
     isForm: true,
-    confirmText: 'Submit All Decisions',
+    confirmText: `Submit All ${beneficiaries.length} Decisions`,
     onConfirm: function(modalEl) {
       let allReviewed = true;
       let allValid = true;
       const decisions = [];
+      let firstError = '';
       
-      // Collect all decisions
+      // ─── COLLECT ALL DECISIONS ──────────────────────────────────────────
       for (const ben of beneficiaries) {
         const decisionEl = document.getElementById(`ben-decision-${ben.id}`);
         const commentEl = document.getElementById(`ben-comment-${ben.id}`);
         const warningEl = document.getElementById(`comment-warning-${ben.id}`);
         
+        // ✅ Check if already reviewed - use existing decision
+        const existingDecision = ben[decisionField];
+        
+        // ✅ If already reviewed, use existing decision
+        if (existingDecision !== null && existingDecision !== undefined && existingDecision !== '') {
+          decisions.push({
+            beneficiaryId: ben.id,
+            decision: existingDecision,
+            comment: ben[decisionField + 'Comment'] || ''
+          });
+          continue;
+        }
+        
+        // ✅ If pending, get from form
         const decision = decisionEl ? decisionEl.value : '';
         const comment = commentEl ? commentEl.value : '';
         
         if (!decision) {
           allReviewed = false;
+          firstError = `Please make a decision for all pending beneficiaries.`;
           break;
         }
         
         // ✅ Check if comment is required for non-approval decisions
         if (decision !== 'allowed' && (!comment || comment.trim() === '')) {
           allValid = false;
+          const individual = ben.beneficiaryIndividual || ben.individual || null;
+          const name = individual ? getUserFullName(individual) : 'Unknown Beneficiary';
+          firstError = `Comment is required for "${decision}" decision for beneficiary: ${name}`;
           if (warningEl) {
             warningEl.classList.remove('hidden');
           }
-          // Highlight the comment field
           if (commentEl) {
             commentEl.classList.add('border-rose-500', 'bg-rose-50');
           }
@@ -4334,28 +5903,38 @@ function openBeneficiaryDecisionModal(requestId, role) {
         });
       }
       
+      // ─── VALIDATION ──────────────────────────────────────────────────────
       if (!allReviewed) {
-        Toast.warning('Please make a decision for all beneficiaries.');
+        Toast.warning(firstError || 'Please make a decision for all pending beneficiaries.');
         return;
       }
       
       if (!allValid) {
-        Toast.error('Comment is required for non-approval decisions.');
+        Toast.error(firstError);
         return;
       }
       
-      // ✅ Use the first decision (backend applies same decision to all)
-      const firstDecision = decisions[0];
+      // ─── ✅ REMOVE DUPLICATES ───────────────────────────────────────────
+      const uniqueDecisions = decisions.filter((d, index, self) => 
+        index === self.findIndex(t => t.beneficiaryId === d.beneficiaryId)
+      );
       
+      // ─── ✅ BUILD PAYLOAD WITH ALL BENEFICIARIES ──────────────────────
+      // ✅ Send ALL beneficiaries (including already reviewed)
       const payload = {
-        beneficiaryId: firstDecision.beneficiaryId,
-        decision: firstDecision.decision,
-        comment: firstDecision.comment || ''
+        decisions: uniqueDecisions.map(d => ({
+          beneficiaryId: d.beneficiaryId,
+          decision: d.decision,
+          comment: d.comment || ''
+        }))
       };
       
+      console.log('✅ Sending payload with ALL beneficiaries:', payload);
+      
+      // ─── ✅ SEND TO API ──────────────────────────────────────────────────
       store.apiService.patch(endpoint, payload)
         .then(() => {
-          Toast.success(`All beneficiary decisions submitted by ${roleLabel}. Request advanced.`);
+          Toast.success(`✅ All ${uniqueDecisions.length} beneficiary decisions submitted by ${roleLabel}.`);
           store.syncWithBackend(true).then(() => {
             viewRequestDetails(requestId);
           });
@@ -4430,7 +6009,7 @@ function openBeneficiaryDecisionModal(requestId, role) {
     });
   }, 200);
 }
-function openBeneficiaryProcessingModal(requestId) {
+ function openBeneficiaryProcessingModal(requestId) {
   const item = store.allocationRequests.find(r => r.id === requestId);
   if (!item) {
     Toast.error('Request not found');
@@ -4613,52 +6192,77 @@ function openBeneficiaryProcessingModal(requestId) {
     });
   }, 200);
 }
-// Alternative: Individual beneficiary decisions
-// You would need a backend endpoint that supports per-beneficiary decisions
 
-function submitIndividualDecisions(requestId, decisions, roleLabel) {
-  const promises = [];
-  
-  decisions.forEach(item => {
-    const payload = {
-      decision: decisionMap[item.decision] || item.decision,
-      comment: item.comment || ''
-    };
-    
-    // This would require a different backend endpoint
-    promises.push(
-      store.apiService.patch(`/house-allocation-requests/${requestId}/beneficiaries/${item.beneficiaryId}/decision`, payload)
-    );
-  });
-  
-  return Promise.all(promises);
+function fetchBeneficiaries() {
+  isLoadingBeneficiaries = true;
+  renderBeneficiariesSection();
+
+  const skip = (beneficiaryPage - 1) * BENEFICIARY_PAGE_SIZE;
+  const params = new URLSearchParams();
+  params.set('skip', String(skip));
+  params.set('take', String(BENEFICIARY_PAGE_SIZE));
+  if (beneficiaryFilters.status) params.set('status', beneficiaryFilters.status);
+  if (beneficiaryFilters.search.trim()) params.set('beneficiaryName', beneficiaryFilters.search.trim());
+  if (beneficiaryFilters.beneficiaryInstitutionId) params.set('institutionId', beneficiaryFilters.beneficiaryInstitutionId);
+
+  const basePath = (beneficiaryViewMode === 'per-request' && beneficiarySelectedRequestId)
+    ? `/house-allocation-requests/${beneficiarySelectedRequestId}/beneficiaries`
+    : `/house-allocation-requests/beneficiaries`;
+
+  return store.apiService.get(`${basePath}?${params.toString()}`)
+    .then(response => {
+      // Handle the response structure: { count, items: [...] }
+      const items = response.items || response.data?.items || response || [];
+      const count = response.count ?? response.data?.count ?? items.length;
+
+      // Store the raw data for filtering
+      beneficiaryData = items;
+      beneficiaryTotalCount = count;
+
+      isLoadingBeneficiaries = false;
+      renderBeneficiariesSection();
+      
+      // Render the table data using the mapped data
+      setTimeout(() => {
+        renderBeneficiaryTableData(items);
+      }, 50);
+    })
+    .catch(error => {
+      console.error('Error fetching beneficiaries:', error);
+      Toast.error(error?.response?.data?.message || 'Failed to load beneficiaries. Please try again.');
+      
+      beneficiaryData = [];
+      beneficiaryTotalCount = 0;
+      isLoadingBeneficiaries = false;
+      renderBeneficiariesSection();
+    });
 }
 
+// ─── GLOBAL EXPORTS ─────────────────────────────────────────────────────
 
-window.openBeneficiaryDecisionModal = openBeneficiaryDecisionModal;
-window.openBeneficiaryProcessingModal = openBeneficiaryProcessingModal;
-window.calculateRequestStatus = calculateRequestStatus;
-window.areAllBeneficiariesReviewed = areAllBeneficiariesReviewed;
-window.hasAnyBeneficiaryRejected = hasAnyBeneficiaryRejected;
-window.getPendingBeneficiaries = getPendingBeneficiaries;
-
-window.navigateToStatus = navigateToStatus;
-window.renderAllocationRequests = renderAllocationRequests;
-window.viewRequestDetails = viewRequestDetails;
-window.openRequestForm = openRequestForm;
-window.openAddBeneficiaryModal = openAddBeneficiaryModal;
-window.openDecisionModal = openDecisionModal;
-window.updateBeneficiaryStatus = updateBeneficiaryStatus;
-window.openBeneficiaryRejectModal = openBeneficiaryRejectModal;
-window.cancelRequest = cancelRequest;
-
-// ✅ Add these if they're not already there:
+window.advanceWorkflow = advanceWorkflow;
 window.deputyCeoStartReview = deputyCeoStartReview;
-window.advanceWorkflow = window.advanceWorkflow; // already defined above
-window.rollbackWorkflow = window.rollbackWorkflow; // already defined above
-window.rejectWorkflow = rejectWorkflow;
-window.cancelWorkflow = cancelWorkflow;
+window.deputyCeoDecision = deputyCeoDecision;
+window.directorDecision = directorDecision;
 window.teamLeaderQueue = teamLeaderQueue;
 window.teamLeaderMap = teamLeaderMap;
 window.teamLeaderReject = teamLeaderReject;
-window.retryRenderAllocationRequests = retryRenderAllocationRequests;
+window.cancelRequest = cancelRequest;
+window.openBeneficiaryDecisionModal = openBeneficiaryDecisionModal;
+window.openBeneficiaryProcessingModal = openBeneficiaryProcessingModal;
+window.openRequestForm = openRequestForm;
+window.openAddBeneficiaryModal = openAddBeneficiaryModal;
+window.updateBeneficiaryStatus = updateBeneficiaryStatus;
+window.openBeneficiaryRejectModal = openBeneficiaryRejectModal;
+window.calculateRequestStatus = calculateRequestStatus;
+window.renderAllocationRequests = renderAllocationRequests;
+window.viewRequestDetails = viewRequestDetails;
+window.fetchBeneficiaries = fetchBeneficiaries;
+window.retryRenderAllocationRequests = renderAllocationRequests;
+window.rejectWorkflow = rejectWorkflow;
+window.cancelWorkflow = cancelWorkflow;
+
+window.navigateToStatus = navigateToStatus;
+// Add any other missing window. assignments here
+
+console.log('✅ House Allocation Requests Module Loaded Successfully');

@@ -422,7 +422,7 @@ class Store {
             this.apiService.get('/institution-tier-assignment').catch(() => null),
             this.apiService.get('/rank-assignments').catch(() => null),
             this.apiService.get('/institutions').catch(() => null),
-            this.apiService.get('/user-extensions').catch(() => null),
+            this.apiService.get('/user-extensions?skip=0&take=50').catch(() => null),
             this.apiService.get('/house-allocation-requests').catch(() => null),
             this.apiService.get('/house-allocation-queue').catch(() => null)
           ]);
