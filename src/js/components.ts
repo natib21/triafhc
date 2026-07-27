@@ -20,6 +20,8 @@ export interface TableOptions<T> {
   onPageChange?: (page: number) => void;
   placeholderText?: string;
   searchValue?: string;
+  rowClassName?: (item: T) => string;
+  firstCellClassName?: (item: T) => string;
 }
 
 export class Table {
@@ -93,15 +95,21 @@ export class Table {
                     </div>
                   </td>
                 </tr>
-              ` : data.map((item, idx) => `
-                <tr class="hover:bg-slate-50 transition-colors">
-                  ${columns.map(col => `
-                    <td class="px-6 py-4 align-middle">
-                      ${col.render ? col.render(item) : String(item[col.key as keyof T] ?? '')}
-                    </td>
-                  `).join('')}
-                </tr>
-              `).join('')}
+              ` : data.map((item, idx) => {
+                const rowClass = options.rowClassName ? options.rowClassName(item) : 'hover:bg-slate-50';
+                return `
+                  <tr class="transition-colors ${rowClass}">
+                    ${columns.map((col, colIdx) => {
+                      const cellClass = (colIdx === 0 && options.firstCellClassName) ? options.firstCellClassName(item) : '';
+                      return `
+                        <td class="px-6 py-4 align-middle ${cellClass}">
+                          ${col.render ? col.render(item) : String(item[col.key as keyof T] ?? '')}
+                        </td>
+                      `;
+                    }).join('')}
+                  </tr>
+                `;
+              }).join('')}
             </tbody>
           </table>
         </div>
@@ -192,6 +200,7 @@ export interface ModalOptions {
   confirmText?: string;
   cancelText?: string;
   isForm?: boolean;
+  onOpen?: (modalElement: HTMLElement) => void | Promise<void>;
 }
 
 export class Modal {
@@ -240,6 +249,10 @@ export class Modal {
 
     wrapper.innerHTML = modalHTML;
     document.body.appendChild(wrapper);
+
+    if (options.onOpen) {
+      options.onOpen(wrapper);
+    }
 
     // Event hooks
     const close = () => {
