@@ -19,133 +19,6 @@ const CATEGORY_TYPE_OPTIONS = [
   { value: 'OTHER', label: 'Other', emoji: '📌' }
 ];
 
-// ─── MAIN RENDER FUNCTION ──────────────────────────────────────────────
-// ─── MAIN RENDER FUNCTION ──────────────────────────────────────────────
-let isLoading = false; // ✅ Add loading flag at module level
-
-export function renderUserExtensions() {
-  try {
-    console.log('renderUserExtensions: Starting...');
-    
-    const contentArea = document.getElementById('main-content-area');
-    if (!contentArea) return;
-
-    if (!store) {
-      console.error('renderUserExtensions: store is undefined');
-      showError('Store is not initialized.');
-      return;
-    }
-
-    // ✅ If already loading, return to prevent infinite loop
-    if (isLoading) {
-      console.log('Already loading, skipping...');
-      return;
-    }
-
-    // ✅ FIX: Ensure store.userExtensions is always an array
-    if (!store.userExtensions || !Array.isArray(store.userExtensions)) {
-      console.warn('renderUserExtensions: store.userExtensions is not an array, initializing as empty array');
-      store.userExtensions = [];
-    }
-
-    // Initialize other store arrays
-    store.ranks = store.ranks || [];
-    store.titles = store.titles || [];
-    store.institutions = store.institutions || [];
-    
-    console.log('Current store.userExtensions:', store.userExtensions);
-    console.log('Is array?', Array.isArray(store.userExtensions));
-    console.log('Length:', store.userExtensions.length);
-
-    // ✅ FIX: Check if we need to fetch data
-    const needsFetch = store.userExtensions.length === 0 || 
-                       (!Array.isArray(store.userExtensions));
-
-    if (needsFetch) {
-      console.log('Fetching user extensions from API...');
-      isLoading = true; // ✅ Set loading flag
-      
-      store.apiService.get('/user-extensions')
-        .then(function(response) {
-          console.log('User extensions API response:', response);
-          
-          let data = [];
-          if (response && response.items && Array.isArray(response.items)) {
-            data = response.items;
-          } else if (Array.isArray(response)) {
-            data = response;
-          } else if (response && typeof response === 'object') {
-            for (const key of Object.keys(response)) {
-              if (Array.isArray(response[key])) {
-                data = response[key];
-                break;
-              }
-            }
-          }
-          
-          console.log('Extracted data:', data);
-          console.log('Data length:', data.length);
-          
-          store.userExtensions = data;
-          isLoading = false; // ✅ Reset loading flag
-          
-          // ✅ Render the UI with the data (not call renderUserExtensions again)
-          renderUI(contentArea);
-        })
-        .catch(function(error) {
-          console.error('Error fetching user extensions:', error);
-          store.userExtensions = [];
-          isLoading = false; // ✅ Reset loading flag on error
-          showError('Failed to load user extensions. Please refresh the page.');
-        });
-      
-      // Show loading state
-      contentArea.innerHTML = `
-        <div class="flex items-center justify-center p-12">
-          <div class="text-center">
-            <div class="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
-            <p class="mt-3 text-sm text-slate-500">Loading user extensions...</p>
-          </div>
-        </div>
-      `;
-      return;
-    }
-
-    // ✅ Data is already loaded, render UI directly
-    console.log('Rendering UI with', store.userExtensions.length, 'user extensions');
-    renderUI(contentArea);
-    
-  } catch (error) {
-    console.error('renderUserExtensions error:', error);
-    showError('Failed to initialize user extensions: ' + error.message);
-  }
-}
-
-// ─── UI RENDER ──────────────────────────────────────────────────────────
-function renderUI(contentArea) {
-  contentArea.innerHTML = `
-    <div class="space-y-6 animate-fade-in">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 class="text-xl font-bold text-slate-900 tracking-tight">User Extensions Directory</h2>
-          <p class="text-xs text-slate-500 mt-0.5">Manage administrative contacts, roles, ranks, and telephone mappings inside institutions.</p>
-        </div>
-        <button id="btn-create-extension" class="sm:self-start px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-lg text-xs font-semibold shadow-xs hover:shadow-md transition-all flex items-center gap-1.5">
-          <i class="fa-solid fa-plus"></i> Add Extension Contact
-        </button>
-      </div>
-
-      <div class="flex items-center gap-3 flex-wrap">
-        <button class="filter-btn px-3 py-1.5 bg-indigo-50 text-indigo-700 font-semibold text-xs rounded-lg transition-all border border-indigo-200 shadow-xs" data-filter="all">All</button>
-        <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-xs" data-filter="active">Active Only</button>
-        <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-xs" data-filter="inactive">Inactive Only</button>
-      </div>
-
-      <div id="user-extensions-table-container"></div>
-    </div>
-  `;
-
-  // ─── STATE ─────────────────────────────────────────────────────────────
   let currentFilter = 'all';
   let searchQuery = '';
 
@@ -293,62 +166,6 @@ function getFilteredData() {
       currentRank: currentRank // ✅ Add currentRank to the item
     };
   });
-}
- function loadAndRenderTable() {
-  try {
-    const data = getFilteredData();
-    const tableContainer = document.getElementById('user-extensions-table-container');
-    if (!tableContainer) return;
-
-    console.log('Table data:', data);
-    console.log('Table data length:', data.length);
-    console.log('First item:', data.length > 0 ? data[0] : 'No data');
-
-    if (!data || data.length === 0) {
-      tableContainer.innerHTML = `
-        <div class="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
-          <div class="px-4 py-3 border-b border-slate-100">
-            <div class="relative">
-              <input type="text" id="search-input" placeholder="Search contacts by name, email, phone..." value="${searchQuery}" class="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500">
-              <i class="fa-solid fa-search absolute left-2.5 top-2 text-slate-400 text-xs"></i>
-            </div>
-          </div>
-          <div class="p-8 text-center">
-            <i class="fa-regular fa-folder-open text-4xl text-slate-300 mb-3 block"></i>
-            <p class="text-sm text-slate-500">No user extensions found</p>
-            <p class="text-xs text-slate-400 mt-1">Click "Add Extension Contact" to create one.</p>
-          </div>
-        </div>
-      `;
-      
-      const searchInput = document.getElementById('search-input');
-      if (searchInput) {
-        searchInput.addEventListener('input', function() {
-          searchQuery = this.value;
-          loadAndRenderTable();
-        });
-      }
-      return;
-    }
-
-    // ✅ DIRECT RENDER: Use manual table rendering instead of Table.render
-    renderManualTable(tableContainer, data);
-    attachActionListeners();
-    
-  } catch (error) {
-    console.error('loadAndRenderTable error:', error);
-    const tableContainer = document.getElementById('user-extensions-table-container');
-    if (tableContainer) {
-      tableContainer.innerHTML = `
-        <div class="bg-rose-50 border border-rose-200 rounded-xl p-6 text-center">
-          <p class="text-sm text-rose-600">Error loading table: ${error.message}</p>
-          <button onclick="location.reload()" class="mt-3 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm">
-            Retry
-          </button>
-        </div>
-      `;
-    }
-  }
 }
 
 
@@ -694,6 +511,362 @@ function renderManualTable(container, data) {
       });
     });
   }
+ function loadAndRenderTable() {
+  try {
+    const data = getFilteredData();
+    const tableContainer = document.getElementById('user-extensions-table-container');
+    if (!tableContainer) return;
+
+    console.log('Table data:', data);
+    console.log('Table data length:', data.length);
+    console.log('First item:', data.length > 0 ? data[0] : 'No data');
+
+    if (!data || data.length === 0) {
+      tableContainer.innerHTML = `
+        <div class="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100">
+            <div class="relative">
+              <input type="text" id="search-input" placeholder="Search contacts by name, email, phone..." value="${searchQuery}" class="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500">
+              <i class="fa-solid fa-search absolute left-2.5 top-2 text-slate-400 text-xs"></i>
+            </div>
+          </div>
+          <div class="p-8 text-center">
+            <i class="fa-regular fa-folder-open text-4xl text-slate-300 mb-3 block"></i>
+            <p class="text-sm text-slate-500">No user extensions found</p>
+            <p class="text-xs text-slate-400 mt-1">Click "Add Extension Contact" to create one.</p>
+          </div>
+        </div>
+      `;
+      
+      const searchInput = document.getElementById('search-input');
+      if (searchInput) {
+        searchInput.addEventListener('input', function() {
+          searchQuery = this.value;
+          loadAndRenderTable();
+        });
+      }
+      return;
+    }
+
+    // ✅ DIRECT RENDER: Use manual table rendering instead of Table.render
+    renderManualTable(tableContainer, data);
+    attachActionListeners();
+    renderPaginationControls();
+    
+  } catch (error) {
+    console.error('loadAndRenderTable error:', error);
+    const tableContainer = document.getElementById('user-extensions-table-container');
+    if (tableContainer) {
+      tableContainer.innerHTML = `
+        <div class="bg-rose-50 border border-rose-200 rounded-xl p-6 text-center">
+          <p class="text-sm text-rose-600">Error loading table: ${error.message}</p>
+          <button onclick="location.reload()" class="mt-3 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm">
+            Retry
+          </button>
+        </div>
+      `;
+    }
+  }
+}
+
+// ─── Helper: Unwrap API Response ──────────────────────────────────────
+function unwrapResponse(response) {
+  // If response is null/undefined, return as-is
+  if (!response) return response;
+  
+  // If response has a data property, use it
+  if (response.data !== undefined && response.data !== null) {
+    return response.data;
+  }
+  
+  // If response has an item property, use it
+  if (response.item !== undefined && response.item !== null) {
+    return response.item;
+  }
+  
+  // If response has an items property (paginated), return it
+  if (response.items !== undefined && Array.isArray(response.items)) {
+    return response.items;
+  }
+  
+  // Otherwise return the response as-is
+  return response;
+}
+
+// ─── MAIN RENDER FUNCTION ──────────────────────────────────────────────
+// ─── MAIN RENDER FUNCTION ──────────────────────────────────────────────
+let isLoading = false; // ✅ Add loading flag at module level
+
+export function renderUserExtensions() {
+  try {
+    console.log('renderUserExtensions: Starting...');
+    
+    const contentArea = document.getElementById('main-content-area');
+    if (!contentArea) return;
+
+    if (!store) {
+      console.error('renderUserExtensions: store is undefined');
+      showError('Store is not initialized.');
+      return;
+    }
+
+    // ✅ If already loading, return to prevent infinite loop
+    if (isLoading) {
+      console.log('Already loading, skipping...');
+      return;
+    }
+
+    // ✅ FIX: Ensure store.userExtensions is always an array
+    if (!store.userExtensions || !Array.isArray(store.userExtensions)) {
+      console.warn('renderUserExtensions: store.userExtensions is not an array, initializing as empty array');
+      store.userExtensions = [];
+    }
+
+    // Initialize other store arrays
+     store.userExtensions = [];
+    store.ranks = store.ranks || [];
+    store.titles = store.titles || [];
+    store.institutions = store.institutions || [];
+
+     renderUI(contentArea);
+    //  fetchPage(1);
+    console.log('Current store.userExtensions:', store.userExtensions);
+    console.log('Is array?', Array.isArray(store.userExtensions));
+    console.log('Length:', store.userExtensions.length);
+
+    // ✅ FIX: Check if we need to fetch data
+    const needsFetch = store.userExtensions.length === 0 || 
+                       (!Array.isArray(store.userExtensions));
+
+    if (needsFetch) {
+      console.log('Fetching user extensions from API...');
+      isLoading = true; // ✅ Set loading flag
+      
+      store.apiService.get('/user-extensions')
+        .then(function(response) {
+          console.log('User extensions API response:', response);
+          
+          let data = [];
+          if (response && response.items && Array.isArray(response.items)) {
+            data = response.items;
+          } else if (Array.isArray(response)) {
+            data = response;
+          } else if (response && typeof response === 'object') {
+            for (const key of Object.keys(response)) {
+              if (Array.isArray(response[key])) {
+                data = response[key];
+                break;
+              }
+            }
+          }
+          
+          console.log('Extracted data:', data);
+          console.log('Data length:', data.length);
+          
+          store.userExtensions = data;
+          isLoading = false; // ✅ Reset loading flag
+          
+          // ✅ Render the UI with the data (not call renderUserExtensions again)
+          renderUI(contentArea);
+        })
+        .catch(function(error) {
+          console.error('Error fetching user extensions:', error);
+          store.userExtensions = [];
+          isLoading = false; // ✅ Reset loading flag on error
+          showError('Failed to load user extensions. Please refresh the page.');
+        });
+      
+      // Show loading state
+      contentArea.innerHTML = `
+        <div class="flex items-center justify-center p-12">
+          <div class="text-center">
+            <div class="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+            <p class="mt-3 text-sm text-slate-500">Loading user extensions...</p>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    // ✅ Data is already loaded, render UI directly
+    console.log('Rendering UI with', store.userExtensions.length, 'user extensions');
+    renderUI(contentArea);
+    
+  } catch (error) {
+    console.error('renderUserExtensions error:', error);
+    showError('Failed to initialize user extensions: ' + error.message);
+  }
+}
+
+// ─── PAGINATION STATE ────────────────────────────────────────────────
+let currentPage = 1;
+let pageSize = 20;
+let totalCount = 0;
+
+// ─── FETCH ONE PAGE ──────────────────────────────────────────────────
+// ─── FETCH ONE PAGE ──────────────────────────────────────────────────
+function fetchPage(page) {
+  // ✅ Prevent multiple simultaneous fetches
+  if (isLoading) {
+    console.log('Already loading, skipping...');
+    return;
+  }
+  
+  isLoading = true;
+  const skip = (page - 1) * pageSize;
+  
+  // ✅ Show loading state in the table container
+  const tableContainer = document.getElementById('user-extensions-table-container');
+  if (tableContainer) {
+    tableContainer.innerHTML = `
+      <div class="flex items-center justify-center p-12">
+        <div class="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+        <p class="ml-3 text-sm text-slate-500">Loading user extensions...</p>
+      </div>
+    `;
+  }
+
+  const url = `/user-extensions?skip=${skip}&take=${pageSize}`;
+  console.log('📡 Fetching:', url);
+  
+  return store.apiService.get(url)
+    .then(function (response) {
+      console.log('📥 Response received:', response);
+      
+      let items = [];
+      let count = 0;
+
+      if (Array.isArray(response)) {
+        items = response;
+        count = response.length;
+      } else if (response && Array.isArray(response.items)) {
+        items = response.items;
+        count = typeof response.count === 'number' ? response.count
+              : typeof response.total === 'number' ? response.total
+              : items.length;
+      } else if (response && Array.isArray(response.data)) {
+        items = response.data;
+        count = typeof response.count === 'number' ? response.count
+              : typeof response.total === 'number' ? response.total
+              : items.length;
+      } else {
+        // Fallback: try to find any array in the response
+        if (response && typeof response === 'object') {
+          for (const key of Object.keys(response)) {
+            if (Array.isArray(response[key])) {
+              items = response[key];
+              count = items.length;
+              break;
+            }
+          }
+        }
+      }
+
+      console.log('📊 Extracted items:', items.length, 'items, total:', count);
+
+      // ✅ Update state
+      store.userExtensions = items;
+      totalCount = count;
+      currentPage = page;
+      isLoading = false;
+
+      // ✅ Load and render the table
+      loadAndRenderTable();
+      renderPaginationControls();
+    })
+    .catch(function (error) {
+      console.error('❌ Error fetching user extensions page:', error);
+      isLoading = false;
+      
+      // ✅ Show error state in the table container
+      const tableContainer = document.getElementById('user-extensions-table-container');
+      if (tableContainer) {
+        tableContainer.innerHTML = `
+          <div class="bg-rose-50 border border-rose-200 rounded-xl p-6 text-center">
+            <p class="text-sm text-rose-600">Failed to load user extensions. Please try again.</p>
+            <button onclick="fetchPage(${currentPage})" class="mt-3 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm">
+              <i class="fa-solid fa-rotate mr-2"></i> Retry
+            </button>
+          </div>
+        `;
+      }
+      Toast.error('Failed to load user extensions. Please try again.');
+    });
+}
+// ─── PAGINATION CONTROLS ─────────────────────────────────────────────
+function renderPaginationControls() {
+  const container = document.getElementById('user-extensions-pagination-container');
+  if (!container) return;
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const start = totalCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const end = Math.min(currentPage * pageSize, totalCount);
+
+  container.innerHTML = `
+    <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-white">
+      <p class="text-xs text-slate-500">Showing ${start}-${end} of ${totalCount}</p>
+      <div class="flex items-center gap-2">
+        <button id="pg-prev" ${currentPage <= 1 ? 'disabled' : ''}
+          class="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 ${currentPage <= 1 ? 'text-slate-300 cursor-not-allowed' : 'text-slate-600 hover:bg-slate-50'}">
+          <i class="fa-solid fa-chevron-left"></i> Prev
+        </button>
+        <span class="text-xs text-slate-500 font-mono">Page ${currentPage} of ${totalPages}</span>
+        <button id="pg-next" ${currentPage >= totalPages ? 'disabled' : ''}
+          class="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 ${currentPage >= totalPages ? 'text-slate-300 cursor-not-allowed' : 'text-slate-600 hover:bg-slate-50'}">
+          Next <i class="fa-solid fa-chevron-right"></i>
+        </button>
+        <select id="pg-size" class="ml-2 px-2 py-1.5 text-xs border border-slate-200 rounded-lg bg-white">
+          ${[10, 20, 50, 100].map(n => `<option value="${n}" ${n === pageSize ? 'selected' : ''}>${n} / page</option>`).join('')}
+        </select>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('pg-prev')?.addEventListener('click', function () {
+    if (currentPage > 1) fetchPage(currentPage - 1);
+  });
+  document.getElementById('pg-next')?.addEventListener('click', function () {
+    if (currentPage < totalPages) fetchPage(currentPage + 1);
+  });
+  document.getElementById('pg-size')?.addEventListener('change', function () {
+    pageSize = parseInt(this.value, 10);
+    fetchPage(1);
+  });
+ }
+
+// ─── UI RENDER ──────────────────────────────────────────────────────────
+function renderUI(contentArea) {
+  contentArea.innerHTML = `
+    <div class="space-y-6 animate-fade-in">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-xl font-bold text-slate-900 tracking-tight">User Extensions Directory</h2>
+          <p class="text-xs text-slate-500 mt-0.5">Manage administrative contacts, roles, ranks, and telephone mappings inside institutions.</p>
+        </div>
+        <button id="btn-create-extension" class="sm:self-start px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-lg text-xs font-semibold shadow-xs hover:shadow-md transition-all flex items-center gap-1.5">
+          <i class="fa-solid fa-plus"></i> Add Extension Contact
+        </button>
+      </div>
+
+      <div class="flex items-center gap-3 flex-wrap">
+        <button class="filter-btn px-3 py-1.5 bg-indigo-50 text-indigo-700 font-semibold text-xs rounded-lg transition-all border border-indigo-200 shadow-xs" data-filter="all">All</button>
+        <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-xs" data-filter="active">Active Only</button>
+        <button class="filter-btn px-3 py-1.5 bg-white text-slate-600 font-medium text-xs rounded-lg transition-all border border-slate-200 hover:bg-slate-50 shadow-xs" data-filter="inactive">Inactive Only</button>
+      </div>
+
+      <div id="user-extensions-table-container">
+        <div class="flex items-center justify-center p-12">
+          <div class="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+          <p class="ml-3 text-sm text-slate-500">Loading user extensions...</p>
+        </div>
+      </div>
+      <div id="user-extensions-pagination-container"></div>
+    </div>
+  `;
+
+
+  // ─── STATE ─────────────────────────────────────────────────────────────
+
 
   // ─── FILTERS ──────────────────────────────────────────────────────────
   document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -714,9 +887,9 @@ function renderManualTable(container, data) {
   document.getElementById('btn-create-extension')?.addEventListener('click', function() {
     openExtensionForm();
   });
-
+loadAndRenderTable();
   // ─── INITIAL LOAD ────────────────────────────────────────────────────
-  loadAndRenderTable();
+  // loadAndRenderTable();
 }
 
 // ─── SHOW ERROR ──────────────────────────────────────────────────────
@@ -1293,7 +1466,11 @@ function createUserExtension(userId) {
     currentTitleId: formData.titleId || null,
     currentRankId: formData.rankId || null,  // ✅ This stores the rank ID in the extension
     institutionId: formData.institutionId || null
-  });
+  }).then(function(response) {
+    const extension = unwrapResponse(response);
+    console.log('createUserExtension: raw response =', response, '| unwrapped =', extension);
+    return extension;
+  });;
 }
 
 // ─── Create Rank Assignment ──────────────────────────────────────────
@@ -1342,7 +1519,8 @@ function updateUserExtension(id) {
     institutionId: formData.institutionId || null
   })
   .then(function(extensionResponse) {
-    console.log('User extension updated:', extensionResponse);
+      const unwrapped = unwrapResponse(extensionResponse);
+    console.log('User extension updated:', unwrapped);
     
     // ✅ If rank is selected, create/update rank assignment
     const rankId = formData.rankId;
@@ -1425,6 +1603,11 @@ function handleSignupAndCreateExtension(password, confirmPassword, modalEl) {
       // ✅ Step 3: Create rank assignment if rank is selected
       const userExtensionId = extensionResponse.id;
       const rankId = formData.rankId;
+
+        console.log("extension =", extensionResponse);
+    console.log("userExtensionId =", userExtensionId);
+    console.log("rankId =", rankId);
+    console.log("before createRankAssignment");
       
       if (rankId && userExtensionId) {
         return createRankAssignment(userExtensionId, rankId)

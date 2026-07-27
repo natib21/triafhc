@@ -9,9 +9,10 @@ import { renderAssignments } from './modules/assignments';
 import { renderTitles } from './modules/titles';
 import { renderInstitutions } from './modules/institutions';
 import { renderUserExtensions } from './modules/userExtensions';
-import {  renderAllocationRequests } from './modules/allocation-requests';
+import { renderAllocationRequests } from './modules/allocation-requests';
 import { renderQueueManagement } from './modules/queueManagement';
-import {initAllocationRequests} from "./modules/allocationRequests.old"
+import { renderQueueByInstitution } from './modules/queueByInstitution'; // ✅ New import
+import { initAllocationRequests } from "./modules/allocationRequests.old";
 
 class Router {
   private routes: Record<string, () => void> = {
@@ -26,6 +27,7 @@ class Router {
     'user-extensions': renderUserExtensions,
     'allocation-requests': initAllocationRequests,
     'queue-management': renderQueueManagement,
+    'queue-by-institution': renderQueueByInstitution, // ✅ New route
   };
 
   public init() {
@@ -40,9 +42,12 @@ class Router {
   }
 
   public async handleRoute(tab: string) {
+     console.log('Router handling route:', tab);
+     console.log('📋 Available routes:', Object.keys(this.routes));
     const renderFn = this.routes[tab];
     if (renderFn) {
       // 1. Update breadcrumb
+      console.log(`✅ Route "${tab}" found, rendering...`);
       this.updateBreadcrumb(tab);
 
       // 2. Update active visual states in Sidebar
@@ -75,10 +80,16 @@ class Router {
               <i class="fa-solid fa-triangle-exclamation text-red-500 text-4xl mb-3"></i>
               <h3 class="text-lg font-semibold text-slate-800">Renderer Crash</h3>
               <p class="text-sm text-slate-500 mt-1">Failed to initialize the dashboard view component.</p>
+              <button onclick="location.reload()" class="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded-lg transition-colors">
+                <i class="fa-solid fa-rotate mr-2"></i>Reload Page
+              </button>
             </div>
           `;
         }
       }
+    } else {
+      console.warn(`Route "${tab}" not found. Falling back to dashboard.`);
+      this.handleRoute('dashboard');
     }
   }
 
@@ -90,23 +101,50 @@ class Router {
         const tab = navItem.getAttribute('data-nav-tab');
         if (tab) {
           store.setActiveTab(tab);
+          
+          // ✅ If clicking on queue-by-institution, also expand the submenu
+          if (tab === 'queue-by-institution') {
+            const parentBtn = navItem.closest('.submenu-container')?.parentElement?.querySelector('[data-nav-tab="queue-management"]');
+            if (parentBtn) {
+              const container = parentBtn.parentElement.querySelector('.submenu-container');
+              if (container) {
+                container.classList.add('open');
+                parentBtn.dataset.expanded = 'true';
+              }
+            }
+          }
         }
       }
     });
   }
 
   private updateSidebarUI(activeTab: string) {
-    const items = document.querySelectorAll('[data-nav-tab]');
-    items.forEach(item => {
-      const tab = item.getAttribute('data-nav-tab');
-      if (tab === activeTab) {
-        // Active visual styling
-        item.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 transition-all';
-      } else {
-        // Idle visual styling
-        item.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-50 border border-transparent transition-all';
-      }
+    // Remove active class from all nav items
+    document.querySelectorAll('[data-nav-tab]').forEach(item => {
+      item.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-50 border border-transparent transition-all';
     });
+
+    // Add active class to the current tab
+    const activeItem = document.querySelector(`[data-nav-tab="${activeTab}"]`);
+    if (activeItem) {
+      activeItem.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 transition-all';
+      
+      // If it's a submenu item, highlight its parent too
+      if (activeTab === 'queue-by-institution') {
+        const parentBtn = activeItem.closest('.submenu-container')?.parentElement?.querySelector('[data-nav-tab="queue-management"]');
+        if (parentBtn) {
+          parentBtn.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 transition-all';
+        }
+      }
+    }
+
+    // Also highlight the parent if the submenu is active
+    if (activeTab === 'queue-by-institution') {
+      const parentBtn = document.querySelector('[data-nav-tab="queue-management"]');
+      if (parentBtn && !parentBtn.classList.contains('text-indigo-700')) {
+        parentBtn.className = 'w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 transition-all';
+      }
+    }
   }
 
   private updateBreadcrumb(tab: string) {
@@ -126,6 +164,7 @@ class Router {
       'user-extensions': { section: 'User Management', label: 'User Extensions' },
       'allocation-requests': { section: 'House Allocation', label: 'Requests' },
       'queue-management': { section: 'House Allocation', label: 'Queue Management' },
+      'queue-by-institution': { section: 'House Allocation', label: 'Queue by Institution' }, // ✅ New breadcrumb
     };
 
     const entry = metadata[tab] || { section: 'FHC', label: 'Admin Panel' };

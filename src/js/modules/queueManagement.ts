@@ -9,15 +9,6 @@ import { Table, Modal, Toast } from '../components';
 // system-calculated, so they get no button, just a tooltip.
 type PriorityFactorKey = 'override' | 'tier' | 'history' | 'rank';
 
-interface PriorityFactorDisplay {
-  key: PriorityFactorKey;
-  label: string;
-  icon: string;      // Font Awesome class
-  color: string;      // semantic color name
-  active: boolean;
-  detail: string;
-  previewable: boolean; // always true for these 4 — there is no "removable"
-}
 interface PriorityFactorPreviewResponse {
   beneficiaryId: string;
   factor: PriorityFactorKey;
@@ -42,15 +33,14 @@ const PRIORITY_FACTOR_META: Record<PriorityFactorKey, { label: string; icon: str
   rank: { label: 'Beneficiary Rank', icon: 'fa-medal', color: 'blue' },
 };
 
-// Tailwind class lookups per semantic color, active vs inactive state
-const FACTOR_COLOR_CLASSES: Record<string, { active: string; inactive: string; text: string }> = {
-  amber: { active: 'bg-amber-50 border-amber-200 text-amber-600', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-amber-700' },
-  purple: { active: 'bg-purple-50 border-purple-200 text-purple-600', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-purple-700' },
-  teal: { active: 'bg-teal-50 border-teal-200 text-teal-600', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-teal-700' },
-  blue: { active: 'bg-blue-50 border-blue-200 text-blue-600', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-blue-700' },
-  indigo: { active: 'bg-indigo-50 border-indigo-200 text-indigo-600', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-indigo-700' },
-  slate: { active: 'bg-slate-100 border-slate-200 text-slate-500', inactive: 'bg-slate-50 border-slate-150 text-slate-300', text: 'text-slate-600' },
-};
+// ─── Module-scoped state ───────────────────────────────────────────────────
+// Holds every row from the last fetch, unfiltered — filters operate on this
+// in memory, so switching a dropdown never re-hits the API.
+let allFlattenedData: any[] = [];
+
+// Guards so we only ever bind the delegated listeners once per container
+// element, even though renderTable() gets called on every refresh.
+let outsideClickListenerAttached = false;
 
 export function renderQueueManagement() {
   const contentArea = document.getElementById('main-content-area');
@@ -109,110 +99,548 @@ export function renderQueueManagement() {
         </div>
       </div>
 
-      <!-- Priority Rules Panel — vertical, professional, no fake scores -->
-      <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-        <button id="priority-rules-toggle" class="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 transition-colors border-b border-transparent">
-          <div class="flex items-center gap-2">
-            <div class="w-7 h-7 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600 text-xs">
-              <i class="fa-solid fa-sitemap"></i>
-            </div>
-            <span class="text-xs font-bold text-slate-800">Priority Rules</span>
-            <span class="text-[10px] text-slate-400 hidden sm:inline">— how queue order is determined</span>
-          </div>
-          <i id="priority-rules-chevron" class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform"></i>
-        </button>
-        <div id="priority-rules-body" class="hidden border-t border-slate-100 px-4 py-3 divide-y divide-slate-100">
+      <!-- Priority Rules Explanation Grid -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+        <h3 class="text-[11px] font-bold text-slate-800 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fa-solid fa-circle-info text-indigo-500"></i> Queue Priority Evaluation Rules
+        </h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
 
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 text-xs shrink-0">
+          <div class="bg-amber-50/50 border border-amber-100 rounded-lg p-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5 text-amber-700 font-bold text-xs">
               <i class="fa-solid fa-star"></i>
+              <span>⭐ Override</span>
             </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">Priority Override</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Applied when the requesting institution has an active override tier. Evaluated first, ahead of every other rule.</p>
-            </div>
+            <p class="text-[10px] text-slate-500 leading-normal">Applied when institution has active override tier. Evaluated first.</p>
           </div>
 
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-purple-50 border border-purple-100 flex items-center justify-center text-purple-600 text-xs shrink-0">
+          <div class="bg-purple-50/50 border border-purple-100 rounded-lg p-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5 text-purple-700 font-bold text-xs">
               <i class="fa-solid fa-building-columns"></i>
+              <span>🏛️ Tier</span>
             </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">Institution Tier</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Evaluated after override. Institutions with a lower tier priority value are placed ahead of others.</p>
-            </div>
+            <p class="text-[10px] text-slate-500 leading-normal">Institution tier priority value. Lower value = higher priority.</p>
           </div>
 
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-600 text-xs shrink-0">
+          <div class="bg-teal-50/50 border border-teal-100 rounded-lg p-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5 text-teal-700 font-bold text-xs">
               <i class="fa-solid fa-list-check"></i>
+              <span>📋 History</span>
             </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">Allocation History</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Evaluated after tier. Institutions with fewer previous allocations are placed ahead of others.</p>
-            </div>
+            <p class="text-[10px] text-slate-500 leading-normal">Institutions with fewer previous allocations get priority.</p>
           </div>
 
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 text-xs shrink-0">
+          <div class="bg-blue-50/50 border border-blue-100 rounded-lg p-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5 text-blue-700 font-bold text-xs">
               <i class="fa-solid fa-medal"></i>
+              <span>🏅 Rank</span>
             </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">Beneficiary Rank</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Evaluated after allocation history. A lower rank priority value is placed ahead of others.</p>
-            </div>
+            <p class="text-[10px] text-slate-500 leading-normal">Beneficiary rank priority. Lower value = higher priority.</p>
           </div>
 
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 text-xs shrink-0">
+          <div class="bg-slate-50 border border-slate-150 rounded-lg p-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5 text-slate-600 font-bold text-xs">
               <i class="fa-solid fa-clock"></i>
+              <span>⏰ FIFO</span>
             </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">FIFO / Tie Breaker</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Used only when every rule above is tied. The beneficiary who entered the waiting list earlier is placed ahead. System-calculated — cannot be manually changed.</p>
-            </div>
-          </div>
-
-          <div class="flex items-start gap-3 py-2.5">
-            <div class="w-7 h-7 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500 text-xs shrink-0">
-              <i class="fa-solid fa-ranking-star"></i>
-            </div>
-            <div>
-              <p class="text-[11px] font-bold text-slate-800">Final Queue Order</p>
-              <p class="text-[10px] text-slate-500 leading-snug">Rules are applied strictly in the order above. The backend computes the final order on every request — it is never calculated on the frontend.</p>
-            </div>
+            <p class="text-[10px] text-slate-500 leading-normal">Tie-breaker: earliest registration gets priority.</p>
           </div>
 
         </div>
       </div>
 
+      <!-- Filter Bar -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[160px]">
+          <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Rank</label>
+          <select id="filter-rank" class="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500">
+            <option value="">All Ranks</option>
+          </select>
+        </div>
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Beneficiary Institution</label>
+          <select id="filter-beneficiary-institution" class="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500">
+            <option value="">All Institutions</option>
+          </select>
+        </div>
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Request Institution</label>
+          <select id="filter-requesting-institution" class="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500">
+            <option value="">All Institutions</option>
+          </select>
+        </div>
+        <button id="btn-clear-filters" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-semibold transition-colors">
+          <i class="fa-solid fa-filter-circle-xmark mr-1"></i> Clear Filters
+        </button>
+      </div>
+
       <!-- Queue Allocation Table -->
-      <div class="overflow-x-auto w-full">
-        <div id="queue-table-container"></div>
+      <div class="space-y-4">
+        <!-- Priority Color Grouping Legend -->
+        <div class="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-xs">
+          <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+            <i class="fa-solid fa-layer-group text-indigo-500"></i> Priority Group Legend
+          </span>
+          <div class="flex flex-wrap items-center gap-3 text-[10px] font-bold">
+            <div class="flex items-center gap-1.5 px-2 py-0.5 bg-rose-50 border border-rose-200 rounded-md text-rose-700">
+              <span class="w-2 h-2 bg-rose-500 rounded-full"></span> OVERRIDE
+            </div>
+            <div class="flex items-center gap-1.5 px-2 py-0.5 bg-indigo-50 border border-indigo-200 rounded-md text-indigo-700">
+              <span class="w-2 h-2 bg-indigo-500 rounded-full"></span> TIER + RANK
+            </div>
+            <div class="flex items-center gap-1.5 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded-md text-blue-700">
+              <span class="w-2 h-2 bg-blue-500 rounded-full"></span> TIER ONLY
+            </div>
+            <div class="flex items-center gap-1.5 px-2 py-0.5 bg-teal-50 border border-teal-200 rounded-md text-teal-700">
+              <span class="w-2 h-2 bg-teal-500 rounded-full"></span> RANK ONLY
+            </div>
+            <div class="flex items-center gap-1.5 px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-md text-slate-600">
+              <span class="w-2 h-2 bg-slate-400 rounded-full"></span> FIFO (No factors)
+            </div>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto w-full">
+          <div id="queue-table-container"></div>
+        </div>
       </div>
     </div>
   `;
 
-  // Priority Rules panel toggle
-  const rulesToggle = document.getElementById('priority-rules-toggle');
-  const rulesBody = document.getElementById('priority-rules-body');
-  const rulesChevron = document.getElementById('priority-rules-chevron');
-  rulesToggle?.addEventListener('click', () => {
-    const isHidden = rulesBody?.classList.contains('hidden');
-    rulesBody?.classList.toggle('hidden');
-    rulesChevron?.classList.toggle('rotate-180', !!isHidden);
-  });
+  // Reset per-mount state so re-mounting the view doesn't carry stale data
+  // or double-bind the outside-click listener.
+  allFlattenedData = [];
+  outsideClickListenerAttached = false;
 
-  // ─── Helpers for reading the real, confirmed response shape ────────────
+  // ─── Filter helpers ───────────────────────────────────────────────────
 
-  function getFullName(individual: any, fallbackId?: string): string {
+  function populateFilterOptions(data: any[]) {
+    const rankSelect = document.getElementById('filter-rank') as HTMLSelectElement;
+    const beneficiaryInstSelect = document.getElementById('filter-beneficiary-institution') as HTMLSelectElement;
+    const requestingInstSelect = document.getElementById('filter-requesting-institution') as HTMLSelectElement;
+    if (!rankSelect || !beneficiaryInstSelect || !requestingInstSelect) return;
+
+    const fillOptions = (select: HTMLSelectElement, values: string[], placeholder: string) => {
+      const previousValue = select.value;
+      select.innerHTML = `<option value="">${placeholder}</option>` +
+        values.map(v => `<option value="${v}">${v}</option>`).join('');
+      // Preserve the current selection if it's still a valid option after refresh
+      if (values.includes(previousValue)) select.value = previousValue;
+    };
+
+    const uniqueSorted = (vals: (string | undefined)[]) =>
+      Array.from(new Set(vals.filter((v): v is string => !!v && v !== 'N/A'))).sort((a, b) => a.localeCompare(b));
+
+    fillOptions(rankSelect, uniqueSorted(data.map(d => d.beneficiaryRank)), 'All Ranks');
+    fillOptions(beneficiaryInstSelect, uniqueSorted(data.map(d => d.beneficiaryInstitutionName)), 'All Institutions');
+    fillOptions(requestingInstSelect, uniqueSorted(data.map(d => d.requestingInstitutionName)), 'All Institutions');
+  }
+
+  function getFilteredData(): any[] {
+    const rank = (document.getElementById('filter-rank') as HTMLSelectElement)?.value || '';
+    const beneficiaryInst = (document.getElementById('filter-beneficiary-institution') as HTMLSelectElement)?.value || '';
+    const requestingInst = (document.getElementById('filter-requesting-institution') as HTMLSelectElement)?.value || '';
+
+    return allFlattenedData.filter(item => {
+      if (rank && item.beneficiaryRank !== rank) return false;
+      if (beneficiaryInst && item.beneficiaryInstitutionName !== beneficiaryInst) return false;
+      if (requestingInst && item.requestingInstitutionName !== requestingInst) return false;
+      return true;
+    });
+  }
+
+  function renderFilteredTable() {
+    renderTable(getFilteredData());
+  }
+
+  // ─── Table render (single source of truth — 3-dot dropdown actions) ───
+
+  function renderTable(data: any[]) {
+    Table.render<any>({
+      containerId: 'queue-table-container',
+      loading: false,
+      placeholderText: 'Search waitlist queue...',
+      columns: [
+        {
+          header: '#',
+          key: 'position',
+          sortable: true,
+          render: (item) => `
+            <span class="inline-flex items-center justify-center w-7 h-7 bg-slate-100 text-slate-800 font-black rounded-lg text-xs border border-slate-200">
+              ${item.position}
+            </span>
+          `
+        },
+        {
+          header: 'Beneficiary',
+          key: 'beneficiaryName',
+          sortable: true,
+          render: (item) => `
+            <div class="space-y-1">
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-slate-800 text-sm">${item.beneficiaryName}</span>
+                ${item.beneficiaryRank !== 'N/A' ? `<span class="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[9px] font-medium rounded border border-blue-200">${item.beneficiaryRank}</span>` : ''}
+                ${item.isOverrideQueue ? `
+                  <span title="${item.overrideQueueReason}" class="px-1.5 py-0.5 bg-rose-100 text-rose-700 text-[9px] font-bold rounded border border-rose-300 flex items-center gap-1">
+                    <i class="fa-solid fa-flag"></i> OVERRIDE
+                  </span>` : ''}
+              </div>
+              <p class="text-[10px] text-slate-500 flex items-center gap-1">
+                <i class="fa-solid fa-building text-slate-400 text-[9px]"></i>
+                ${item.institutionName}
+              </p>
+            </div>
+          `
+        },
+        {
+          header: 'Beneficiary Institution',
+          key: 'beneficiaryInstitutionName',
+          sortable: true,
+          render: (item) => {
+            const hasInstitution = item.beneficiaryInstitutionName && item.beneficiaryInstitutionName !== 'N/A';
+            if (!hasInstitution) {
+              return `<span class="text-xs text-slate-400">No institution</span>`;
+            }
+            return `
+              <div class="space-y-0.5">
+                <p class="font-semibold text-slate-800 text-xs">${item.beneficiaryInstitutionName}</p>
+                ${item.beneficiaryInstitutionCode && item.beneficiaryInstitutionCode !== 'N/A'
+                  ? `<p class="text-[9px] text-slate-400 font-mono">${item.beneficiaryInstitutionCode}</p>`
+                  : ''}
+                ${item.beneficiaryInstitutionType && item.beneficiaryInstitutionType !== 'N/A'
+                  ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded text-[9px]">${item.beneficiaryInstitutionType}</span>`
+                  : ''}
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Rank',
+          key: 'beneficiaryRank',
+          render: (item) => `
+            <div class="space-y-1">
+              ${item.beneficiaryRank !== 'N/A'
+                ? `<div class="flex items-center gap-1.5">
+                    <i class="fa-solid fa-medal text-blue-500 text-[10px]"></i>
+                    <span class="font-semibold text-slate-700 text-xs">${item.beneficiaryRank}</span>
+                   </div>
+                   <p class="text-[9px] text-slate-400">Priority: ${item.beneficiaryRankPriority}</p>`
+                : `<span class="text-xs text-slate-400">No rank</span>`
+              }
+            </div>
+          `
+        },
+        {
+          header: 'Request Institution',
+          key: 'requestingInstitutionName',
+          sortable: true,
+          render: (item) => {
+            const hasInstitution = item.requestingInstitutionName && item.requestingInstitutionName !== 'N/A';
+            if (!hasInstitution) {
+              return `<span class="text-xs text-slate-400">No institution</span>`;
+            }
+            return `
+              <div class="space-y-0.5">
+                <p class="font-semibold text-slate-800 text-xs">${item.requestingInstitutionName}</p>
+                ${item.requestingInstitutionCode && item.requestingInstitutionCode !== 'N/A'
+                  ? `<p class="text-[9px] text-slate-400 font-mono">${item.requestingInstitutionCode}</p>`
+                  : ''}
+                ${item.requestingInstitutionType && item.requestingInstitutionType !== 'N/A'
+                  ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[9px]">${item.requestingInstitutionType}</span>`
+                  : ''}
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Institution Tier',
+          key: 'requestingInstitutionTier',
+          render: (item) => {
+            const hasTier = item.requestingInstitutionTier && item.requestingInstitutionTier !== 'N/A';
+            return `
+              <div class="space-y-1">
+                ${hasTier
+                  ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-[10px] font-medium">
+                      <i class="fa-solid fa-building-columns text-[9px]"></i>
+                      ${item.requestingInstitutionTier}
+                     </span>
+                     <p class="text-[9px] text-slate-400">Priority: ${item.requestingInstitutionTierPriority}</p>
+                     ${item.requestingInstitutionTierName && item.requestingInstitutionTierName !== 'N/A'
+                       ? `<p class="text-[9px] text-slate-400">${item.requestingInstitutionTierName}</p>`
+                       : ''}`
+                  : `<span class="text-xs text-slate-400">No tier assigned</span>`
+                }
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Registered',
+          key: 'registeredAt',
+          render: (item) => {
+            let dateTimeDisplay = 'N/A';
+            let durationDisplay = 'N/A';
+
+            if (item.registeredAt && item.registeredAt !== 'N/A') {
+              const d = new Date(item.registeredAt);
+              if (!isNaN(d.getTime())) {
+                dateTimeDisplay = d.toLocaleDateString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric'
+                }) + ' · ' + d.toLocaleTimeString('en-US', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                });
+
+                const diffMs = Date.now() - d.getTime();
+                const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+
+                if (days > 0) {
+                  durationDisplay = `${days}d ${hours}h ago`;
+                } else if (hours > 0) {
+                  durationDisplay = `${hours}h ago`;
+                } else {
+                  durationDisplay = 'Less than an hour ago';
+                }
+              }
+            }
+
+            return `
+              <div class="space-y-0.5">
+                <p class="text-xs font-medium text-slate-700">${dateTimeDisplay}</p>
+                <p class="text-[9px] text-slate-400">${durationDisplay}</p>
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Letter Reference',
+          key: 'referenceNumber',
+          render: (item) => `
+            <div class="space-y-0.5">
+              <p class="font-mono font-bold text-indigo-600 text-xs">${item.referenceNumber}</p>
+              <p class="text-[9px] text-slate-400">${item.letterDate}</p>
+            </div>
+          `
+        },
+        {
+          header: 'Nationality',
+          key: 'beneficiaryNationality',
+          render: (item) => `
+            <div class="flex items-center gap-1.5">
+              <i class="fa-solid fa-flag text-slate-400 text-[10px]"></i>
+              <span class="text-xs text-slate-700">${item.beneficiaryNationality}</span>
+            </div>
+          `
+        },
+        {
+          header: 'Phone',
+          key: 'beneficiaryPhone',
+          render: (item) => `
+            <div class="flex items-center gap-1.5">
+              <i class="fa-solid fa-phone text-slate-400 text-[10px]"></i>
+              <span class="text-xs text-slate-700">${item.beneficiaryPhone}</span>
+            </div>
+          `
+        },
+        {
+          header: 'Priority',
+          key: 'priorityBreakdown',
+          render: (item) => {
+            const factors: Array<{ key: PriorityFactorKey; active: boolean; label: string; color: string }> = [
+              { key: 'override', active: item.priorityBreakdown?.isOverride === true, label: 'OV', color: 'amber' },
+              { key: 'tier', active: item.priorityBreakdown?.institution?.tierPriority != null, label: 'TI', color: 'purple' },
+              { key: 'history', active: item.priorityBreakdown?.institution?.allocationHistoryCount != null, label: 'HI', color: 'teal' },
+              { key: 'rank', active: item.priorityBreakdown?.beneficiary?.rankPriority != null, label: 'RK', color: 'blue' },
+            ];
+
+            const activeCount = factors.filter(f => f.active).length;
+
+            const badges = factors.map(f => {
+              const meta = PRIORITY_FACTOR_META[f.key];
+              const isActive = f.active;
+              const badgeClass = isActive
+                ? `bg-${f.color}-50 text-${f.color}-700 border-${f.color}-200 hover:scale-105 hover:brightness-95 cursor-pointer`
+                : `bg-slate-50 text-gray-400 border-gray-200 hover:scale-105 hover:brightness-95 cursor-pointer`;
+
+              return `
+                <button
+                  type="button"
+                  data-priority-factor="${f.key}"
+                  data-beneficiary-id="${item.beneficiaryId}"
+                  data-beneficiary-name="${item.beneficiaryName}"
+                  title="${meta.label}: ${isActive ? 'Active' : 'Inactive'}"
+                  class="w-6 h-6 rounded-md text-[9px] font-bold border transition-all flex items-center justify-center ${badgeClass}"
+                >
+                  ${f.label}
+                </button>
+              `;
+            }).join('');
+
+            return `
+              <div class="flex items-center gap-1.5">
+                <span class="text-[10px] font-bold text-slate-400 min-w-[20px]">${activeCount}/4</span>
+                <div class="flex gap-0.5">${badges}</div>
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Status',
+          key: 'beneficiaryStatus',
+          render: (item) => {
+            const statusColors: Record<string, string> = {
+              'eligible': 'bg-blue-50 text-blue-700 border-blue-200',
+              'waiting_list': 'bg-teal-50 text-teal-700 border-teal-200',
+              'allocated': 'bg-emerald-50 text-emerald-700 border-emerald-200',
+              'unauthorized_by_directive': 'bg-rose-50 text-rose-700 border-rose-200',
+              'pending_review': 'bg-amber-50 text-amber-700 border-amber-200',
+              'under_legal_revision': 'bg-purple-50 text-purple-700 border-purple-200'
+            };
+            const color = statusColors[String(item.beneficiaryStatus).toLowerCase()] || 'bg-slate-50 text-slate-700 border-slate-200';
+            return `
+              <div class="space-y-1">
+                <span class="px-2 py-0.5 ${color} border text-[10px] font-bold rounded-md block text-center">${item.beneficiaryStatus}</span>
+                <span class="text-[9px] text-slate-400 text-center block">${item.requestStatus}</span>
+              </div>
+            `;
+          }
+        },
+        {
+          header: 'Actions',
+          key: 'beneficiaryId',
+          render: (item) => {
+            if (item.beneficiaryStatus === 'allocated') {
+              return `<span class="text-xs text-emerald-600 font-semibold block text-center"><i class="fa-solid fa-check-circle mr-1"></i>Allocated</span>`;
+            }
+            if (item.beneficiaryStatus === 'unauthorized_by_directive') {
+              return `<span class="text-xs text-rose-600 font-semibold block text-center"><i class="fa-solid fa-ban mr-1"></i>Rejected</span>`;
+            }
+            if (item.beneficiaryStatus !== 'waiting_list') {
+              return `<span class="text-xs text-slate-400 block text-center">Not in queue</span>`;
+            }
+
+            // 3-dot dropdown using <details>/<summary> — no JS state needed to open/close.
+            return `
+              <details class="dropdown-container relative">
+                <summary class="dropdown-trigger list-none cursor-pointer w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 transition-colors mx-auto">
+                  <i class="fa-solid fa-ellipsis-vertical text-slate-500 text-sm"></i>
+                </summary>
+                <div class="dropdown-menu absolute right-0 mt-1 w-52 bg-white border border-slate-200 rounded-lg shadow-lg z-20 py-1">
+                  <button
+                    data-action="allocate"
+                    data-beneficiary-id="${item.beneficiaryId}"
+                    class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-emerald-600 hover:bg-emerald-50 flex items-center gap-2 transition-colors"
+                  >
+                    <i class="fa-solid fa-check-circle"></i> Allocate House
+                  </button>
+                  <button
+                    data-action="reject"
+                    data-beneficiary-id="${item.beneficiaryId}"
+                    class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition-colors"
+                  >
+                    <i class="fa-solid fa-ban"></i> Reject
+                  </button>
+                  <div class="border-t border-slate-100 my-1"></div>
+                  ${item.isOverrideQueue ? `
+                    <button
+                      data-action="clear-override"
+                      data-beneficiary-id="${item.beneficiaryId}"
+                      data-beneficiary-name="${item.beneficiaryName}"
+                      class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-amber-600 hover:bg-amber-50 flex items-center gap-2 transition-colors"
+                    >
+                      <i class="fa-solid fa-flag-checkered"></i> Clear Override
+                    </button>
+                  ` : `
+                    <button
+                      data-action="set-override"
+                      data-beneficiary-id="${item.beneficiaryId}"
+                      data-beneficiary-name="${item.beneficiaryName}"
+                      data-position="${item.position}"
+                      class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-purple-600 hover:bg-purple-50 flex items-center gap-2 transition-colors"
+                    >
+                      <i class="fa-solid fa-arrow-up-from-ground-water"></i> Override to Front
+                    </button>
+                  `}
+                  <div class="border-t border-slate-100 my-1"></div>
+                  <button
+                    data-action="explain"
+                    data-beneficiary-id="${item.beneficiaryId}"
+                    class="dropdown-item w-full text-left px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                  >
+                    <i class="fa-solid fa-circle-info"></i> View Priority Explanation
+                  </button>
+                </div>
+              </details>
+            `;
+          }
+        }
+      ],
+      data,
+      emptyState: `
+        <div class="text-center py-12">
+          <i class="fa-solid fa-inbox text-4xl text-slate-300 mb-3"></i>
+          <p class="text-slate-500 text-sm">No beneficiaries match the current filters</p>
+        </div>
+      `,
+      rowClassName: (item) => {
+        if (item.isOverride) {
+          return 'bg-rose-50/30';
+        }
+        const hasTier = item.institutionTierPriority !== 'N/A' && item.institutionTierPriority !== null;
+        const hasRank = item.beneficiaryRankPriority !== 'N/A' && item.beneficiaryRankPriority !== null;
+        if (hasTier && hasRank) return 'bg-indigo-50/30';
+        if (hasTier) return 'bg-blue-50/30';
+        if (hasRank) return 'bg-teal-50/30';
+        return 'bg-slate-50/30';
+      }
+    });
+
+    attachActionListeners();
+  }
+
+  // ─── Data-shaping helpers for the real, confirmed response shape ──────
+
+  function getDisplayName(individual: any, fallbackId?: string): string {
     if (!individual) return fallbackId || 'Unknown Beneficiary';
-    // Confirmed shape: beneficiaryIndividual.fullName is a plain string
-    // (often empty in current data), plus userId. There is no
-    // firstName/lastName object on this entity — do not read one.
-    if (individual.fullName && String(individual.fullName).trim()) {
-      return String(individual.fullName).trim();
+
+    const getVal = (val: any) => {
+      if (!val) return '';
+      if (typeof val === 'string') return val;
+      return val.en || val.am || '';
+    };
+
+    const firstName = getVal(individual.firstName);
+    const middleName = getVal(individual.middleName);
+    const lastName = getVal(individual.lastName);
+    let fullName = [firstName, middleName, lastName].filter(Boolean).join(' ').trim();
+
+    if (!fullName && individual.fullName && String(individual.fullName).trim()) {
+      fullName = String(individual.fullName).trim();
     }
+
+    let title = '';
+    if (individual.currentTitle) {
+      const ct = individual.currentTitle;
+      title = ct.abbreviations?.en ||
+              ct.abbreviations?.am ||
+              ct.name?.en ||
+              ct.name?.am ||
+              (typeof ct.name === 'string' ? ct.name : '');
+    }
+
+    if (fullName) {
+      return title ? `${title} ${fullName}` : fullName;
+    }
+
+    if (individual.user) {
+      const user = individual.user;
+      const uName = getVal(user.name);
+      return uName || user.username || fallbackId || 'Unknown Beneficiary';
+    }
+
     return individual.userId || fallbackId || 'Unknown Beneficiary';
   }
 
@@ -235,47 +663,7 @@ export function renderQueueManagement() {
     return `${days}d`;
   }
 
-  // Normalizes item.priorityBreakdown into a display-ready factor list.
-  // Confirmed real fields: isOverride, institution.{tierCode,tierPriority,
-  // allocationHistoryCount}, beneficiary.{rankCode,rankPriority}. There is
-  // no score/contribution field anywhere in the real response — none is
-  // invented here.
-  function getPriorityFactors(priorityBreakdown: any): PriorityFactorDisplay[] {
-    const pb = priorityBreakdown || {};
-    const institution = pb.institution || {};
-    const beneficiary = pb.beneficiary || {};
-
-    return [
-      {
-        key: 'override',
-        ...PRIORITY_FACTOR_META.override,
-        active: !!pb.isOverride,
-        detail: pb.isOverride ? 'Override institution — evaluated first' : 'No institution override',
-        previewable: true,
-      },
-      {
-        key: 'tier',
-        ...PRIORITY_FACTOR_META.tier,
-        active: institution.tierPriority !== null && institution.tierPriority !== undefined,
-        detail: institution.tierCode ? `Tier: ${institution.tierCode} (priority ${institution.tierPriority})` : 'No institution tier assigned',
-        previewable: true,
-      },
-      {
-        key: 'history',
-        ...PRIORITY_FACTOR_META.history,
-        active: true, // always evaluated, even at 0
-        detail: `${institution.allocationHistoryCount ?? 0} previous allocation${institution.allocationHistoryCount === 1 ? '' : 's'} for this institution`,
-        previewable: true,
-      },
-      {
-        key: 'rank',
-        ...PRIORITY_FACTOR_META.rank,
-        active: beneficiary.rankPriority !== null && beneficiary.rankPriority !== undefined,
-        detail: beneficiary.rankCode ? `Rank: ${beneficiary.rankCode} (priority ${beneficiary.rankPriority})` : 'No rank assigned',
-        previewable: true,
-      },
-    ];
-  }
+  // ─── Load + flatten queue data ─────────────────────────────────────────
 
   const loadAndRenderTable = async () => {
     try {
@@ -306,16 +694,16 @@ export function renderQueueManagement() {
         const individual = beneficiary.beneficiaryIndividual || {};
         const institution = beneficiary.beneficiaryInstitution || {};
         const requestingInstitution = request.requestingInstitution || {};
+        const requestingTier = requestingInstitution.currentTier || {};
 
         // CRITICAL: beneficiary.id (the queue-row/beneficiary entity id) is
         // NOT the same as priorityBreakdown.beneficiary.id (the individual's
-        // row id) in the confirmed response — e.g. item 1 has
-        // beneficiary.id = "77ab9274..." but priorityBreakdown.beneficiary.id
-        // = "359db143...". Every action (allocate/reject/preview/position)
-        // must use beneficiary.id, never priorityBreakdown.beneficiary.id.
+        // row id) in the confirmed response. Every action (allocate/reject/
+        // preview/position/override) must use beneficiary.id, never
+        // priorityBreakdown.beneficiary.id.
         const beneficiaryId = beneficiary.id;
 
-        const fullName = getFullName(individual, beneficiaryId);
+        const fullName = getDisplayName(individual, beneficiaryId);
         const instName = getInstitutionName(institution);
 
         return {
@@ -337,12 +725,12 @@ export function renderQueueManagement() {
           beneficiaryNationalId: individual.nationalIdNumber || 'N/A',
           beneficiaryDateOfBirth: individual.dateOfBirth ? formatDate(individual.dateOfBirth) : 'N/A',
           beneficiaryStatus: beneficiary.status || 'N/A',
+          beneficiaryNationality: individual.nationality || 'N/A',
 
           waitingListPosition: beneficiary.waitingListPosition ?? 'N/A',
           enteredWaitingListAt: beneficiary.enteredWaitingListAt || null,
           waitingDuration: waitingDurationDays(beneficiary.enteredWaitingListAt),
 
-          // Confirmed field names on the beneficiary row itself.
           isOverrideQueue: !!beneficiary.isOverrideQueue,
           overrideQueueReason: beneficiary.overrideQueueReason || 'N/A',
 
@@ -358,234 +746,46 @@ export function renderQueueManagement() {
           institutionTierPriority: priorityBreakdown.institution?.tierPriority ?? 'N/A',
           allocationHistoryCount: priorityBreakdown.institution?.allocationHistoryCount ?? 0,
 
+          beneficiaryInstitutionId: institution.id || 'N/A',
+          beneficiaryInstitutionName: instName,
+          beneficiaryInstitutionCode: institution.code || 'N/A',
+          beneficiaryInstitutionType: institution.institutionType || 'N/A',
+          beneficiaryInstitutionShortName: institution.shortName || 'N/A',
+
           requestId: request.id || 'N/A',
           referenceNumber: request.letterReferenceNumber || 'N/A',
           letterDate: request.letterDate ? formatDate(request.letterDate) : 'N/A',
           registeredAt: request.registeredAt ? formatDate(request.registeredAt) : 'N/A',
           authorizingOfficial: request.authorizingOfficial?.fullName || 'N/A',
           requestStatus: request.status || 'N/A',
+
+          requestingInstitutionId: requestingInstitution.id || 'N/A',
+          requestingInstitutionName: getInstitutionName(requestingInstitution),
+          requestingInstitutionCode: requestingInstitution.code || 'N/A',
+          requestingInstitutionShortName: requestingInstitution.shortName || 'N/A',
+          requestingInstitutionType: requestingInstitution.institutionType || 'N/A',
+          requestingInstitutionTier: requestingTier.code || 'N/A',
+          requestingInstitutionTierPriority: requestingTier.allocationPriority ?? 'N/A',
+          requestingInstitutionTierName: requestingTier.name?.en || requestingTier.name?.am || 'N/A',
         };
       });
 
-      // Stats — from the backend's own totals, never invented.
       document.getElementById('active-queue-count')!.textContent = `${total} Beneficiaries`;
       document.getElementById('avg-wait-time')!.textContent =
         estimatedClearDays !== null ? `${estimatedClearDays} Days` : 'N/A';
       const allocatedCount = items.filter((q: any) => q.beneficiary?.status === 'allocated').length;
       document.getElementById('historical-disbursals')!.textContent = `${allocatedCount} Houses Mapped`;
 
-      // Display-only sort — matches backend-provided position, never
-      // recalculates it.
+      // Display-only sort — matches backend-provided position, never recalculates it.
       flattenedData.sort((a, b) => {
         const pa = typeof a.position === 'number' ? a.position : Infinity;
         const pb = typeof b.position === 'number' ? b.position : Infinity;
         return pa - pb;
       });
 
-      Table.render<any>({
-        containerId: 'queue-table-container',
-        loading: false,
-        placeholderText: 'Search waitlist queue...',
-        columns: [
-          {
-            header: '#',
-            key: 'position',
-            sortable: true,
-            render: (item) => `
-              <span class="inline-flex items-center justify-center w-7 h-7 bg-slate-100 text-slate-800 font-black rounded-lg text-xs border border-slate-200">
-                ${item.position}
-              </span>
-            `
-          },
-        {
-  header: 'Priority',
-  key: 'priorityBreakdown',
-  render: (item) => {
-    const factors: Array<{ key: PriorityFactorKey; active: boolean; detail: string }> = [
-      { key: 'override', active: !!item.priorityBreakdown.isOverride, detail: item.priorityBreakdown.isOverride ? 'Override institution' : 'No override' },
-      { key: 'tier', active: item.priorityBreakdown.institution?.tierPriority != null, detail: item.priorityBreakdown.institution?.tierCode || 'No tier' },
-      { key: 'history', active: true, detail: `${item.priorityBreakdown.institution?.allocationHistoryCount ?? 0} previous allocations` },
-      { key: 'rank', active: item.priorityBreakdown.beneficiary?.rankPriority != null, detail: item.priorityBreakdown.beneficiary?.rankCode || 'No rank' },
-    ];
-
-    const buttons = factors.map(f => {
-      const meta = PRIORITY_FACTOR_META[f.key];
-      const isActive = f.active;
-      
-      // Bold, prominent styling for active factors with glow effect
-      const activeClass = isActive 
-        ? `bg-${meta.color}-50 border-${meta.color}-300 text-${meta.color}-700 shadow-md ring-2 ring-${meta.color}-200/50 scale-105 font-bold`
-        : `bg-slate-50 border-slate-150 text-slate-300 opacity-40`;
-      
-      const activeDot = isActive 
-        ? `<span class="absolute -top-0.5 -right-0.5 w-2 h-2 bg-${meta.color}-500 rounded-full animate-pulse ring-2 ring-white"></span>`
-        : '';
-      
-      return `
-        <button
-          type="button"
-          data-priority-factor="${f.key}"
-          data-beneficiary-id="${item.beneficiaryId}"
-          data-beneficiary-name="${item.beneficiaryName}"
-          title="${meta.label}: ${f.detail}"
-          class="relative w-8 h-8 flex items-center justify-center rounded-lg border text-sm ${activeClass} hover:brightness-95 transition-all duration-200 ${isActive ? 'cursor-pointer hover:scale-105' : 'cursor-default'}"
-        >
-          <i class="fa-solid ${meta.icon} ${isActive ? 'text-base' : 'text-xs'}"></i>
-          ${activeDot}
-          ${isActive ? `<span class="absolute -bottom-1.5 text-[6px] font-black text-${meta.color}-600 uppercase tracking-wider">●</span>` : ''}
-        </button>
-      `;
-    }).join('');
-
-    return `<div class="flex flex-wrap gap-2 items-center">${buttons}</div>`;
-  }
-},
-          {
-            header: 'Beneficiary',
-            key: 'beneficiaryName',
-            sortable: true,
-            render: (item) => `
-              <div class="space-y-1.5">
-                <div class="flex items-center gap-2">
-                  <span class="font-bold text-slate-800 text-sm">${item.beneficiaryName}</span>
-                  ${item.isOverride ? '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[9px] font-bold rounded-full border border-amber-200"><i class="fa-solid fa-star"></i> Override</span>' : ''}
-                </div>
-                <div class="flex flex-wrap gap-2 text-[10px] text-slate-500">
-                  <span><i class="fa-solid fa-medal text-blue-500 mr-1"></i>${item.beneficiaryRank}</span>
-                  <span><i class="fa-solid fa-id-badge text-slate-400 mr-1"></i>${item.beneficiaryTitle}</span>
-                </div>
-              </div>
-            `
-          },
-          {
-            header: 'Contact',
-            key: 'beneficiaryEmail',
-            render: (item) => `
-              <div class="space-y-1 text-[10px] text-slate-500">
-                <p><i class="fa-solid fa-envelope text-slate-400 mr-1"></i>${item.beneficiaryEmail}</p>
-                <p><i class="fa-solid fa-phone text-slate-400 mr-1"></i>${item.beneficiaryPhone}</p>
-              </div>
-            `
-          },
-          {
-            header: 'Identity',
-            key: 'beneficiaryNationalId',
-            render: (item) => `
-              <div class="space-y-1 text-[10px] text-slate-500">
-                <p><i class="fa-solid fa-id-card text-slate-400 mr-1"></i>${item.beneficiaryNationalId}</p>
-                <p><i class="fa-solid fa-cake-candles text-slate-400 mr-1"></i>${item.beneficiaryDateOfBirth}</p>
-                <p><i class="fa-solid fa-venus-mars text-slate-400 mr-1"></i>${item.beneficiaryGender}</p>
-              </div>
-            `
-          },
-          {
-            header: 'Waiting List',
-            key: 'waitingListPosition',
-            render: (item) => `
-              <div class="space-y-1 text-[10px] text-slate-500 text-center">
-                <p class="font-mono font-bold text-slate-700">#${item.waitingListPosition}</p>
-                <p>${item.enteredWaitingListAt ? formatDate(item.enteredWaitingListAt) : 'N/A'}</p>
-                <p class="text-slate-400">${item.waitingDuration} waiting</p>
-              </div>
-            `
-          },
-          {
-            header: 'Decisions',
-            key: 'deputyCeoDecision',
-            render: (item) => `
-              <div class="space-y-1 text-[9px]">
-                <p><span class="text-slate-400">Deputy CEO:</span> <span class="font-semibold">${item.deputyCeoDecision}</span></p>
-                <p><span class="text-slate-400">Director:</span> <span class="font-semibold">${item.directorDecision}</span></p>
-                <p><span class="text-slate-400">Team Leader:</span> <span class="font-semibold">${item.teamLeaderDecision}</span></p>
-              </div>
-            `
-          },
-          {
-            header: 'Institution',
-            key: 'institutionName',
-            sortable: true,
-            render: (item) => `
-              <div class="space-y-1.5">
-                <p class="font-semibold text-slate-800 text-sm">${item.institutionName}</p>
-                <p class="text-[10px] text-slate-400 font-mono">${item.institutionShortName}</p>
-                <div class="flex flex-wrap gap-1 text-[9px]">
-                  <span class="px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded border border-blue-200">${item.institutionType}</span>
-                  <span class="px-1.5 py-0.5 bg-purple-50 text-purple-700 rounded border border-purple-200"><i class="fa-solid fa-building-columns mr-1"></i>${item.institutionTier}</span>
-                </div>
-                <p class="text-[9px] text-slate-400">Tier priority: ${item.institutionTierPriority} · ${item.allocationHistoryCount} prior allocation${item.allocationHistoryCount === 1 ? '' : 's'}</p>
-              </div>
-            `
-          },
-          {
-            header: 'Request',
-            key: 'referenceNumber',
-            render: (item) => `
-              <div class="space-y-1 text-[10px] text-slate-500">
-                <p class="font-mono font-bold text-indigo-900 text-xs">${item.referenceNumber}</p>
-                <p>Letter: ${item.letterDate}</p>
-                <p>Registered: ${item.registeredAt}</p>
-                <p>Official: ${item.authorizingOfficial}</p>
-              </div>
-            `
-          },
-          {
-            header: 'Status',
-            key: 'beneficiaryStatus',
-            render: (item) => {
-              const statusColors: Record<string, string> = {
-                'eligible': 'bg-blue-50 text-blue-700 border-blue-200',
-                'waiting_list': 'bg-teal-50 text-teal-700 border-teal-200',
-                'allocated': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-                'unauthorized_by_directive': 'bg-rose-50 text-rose-700 border-rose-200',
-                'pending_review': 'bg-amber-50 text-amber-700 border-amber-200',
-                'under_legal_revision': 'bg-purple-50 text-purple-700 border-purple-200'
-              };
-              const color = statusColors[String(item.beneficiaryStatus).toLowerCase()] || 'bg-slate-50 text-slate-700 border-slate-200';
-              return `
-                <div class="space-y-1.5">
-                  <span class="px-2 py-0.5 ${color} border text-[10px] font-bold rounded-md block text-center">${item.beneficiaryStatus}</span>
-                  <span class="px-2 py-0.5 bg-slate-50 border border-slate-150 text-slate-600 text-[9px] rounded-md block text-center">${item.requestStatus}</span>
-                </div>
-              `
-            }
-          },
-          {
-            header: 'Actions',
-            key: 'beneficiaryId',
-            render: (item) => {
-              if (item.beneficiaryStatus === 'allocated') {
-                return `<span class="text-xs text-emerald-600 font-semibold block text-center"><i class="fa-solid fa-check-circle mr-1"></i>Allocated</span>`;
-              }
-              if (item.beneficiaryStatus === 'unauthorized_by_directive') {
-                return `<span class="text-xs text-rose-600 font-semibold block text-center"><i class="fa-solid fa-ban mr-1"></i>Rejected</span>`;
-              }
-              if (item.beneficiaryStatus !== 'waiting_list') {
-                return `<span class="text-xs text-slate-400 block text-center">Not in queue</span>`;
-              }
-              // NOTE: "Set Override" / "Remove Override" are intentionally
-              // omitted. The backend endpoint that used to power them
-              // (PATCH /house-allocation-queue/:id/priority) has been
-              // removed — override is now purely a fact of the requesting
-              // institution's tier (isOverrideTier), not a per-beneficiary
-              // toggle this controller exposes. Adding these buttons back
-              // would call an endpoint that no longer exists.
-              return `
-                <div class="flex flex-col gap-1.5">
-                  <button data-allocate-id="${item.beneficiaryId}" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center justify-center gap-1">
-                    <i class="fa-solid fa-check"></i> Allocate
-                  </button>
-                  <button data-reject-id="${item.beneficiaryId}" class="px-3 py-1.5 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1">
-                    <i class="fa-solid fa-ban"></i> Reject
-                  </button>
-                </div>
-              `;
-            }
-          }
-        ],
-        data: flattenedData,
-      });
-
-      attachActionListeners();
+      allFlattenedData = flattenedData;
+      populateFilterOptions(allFlattenedData);
+      renderFilteredTable();
 
     } catch (error: any) {
       console.error('Failed to load queue data:', error);
@@ -610,48 +810,84 @@ export function renderQueueManagement() {
     }
   };
 
+  // ─── Event delegation (bound once) ─────────────────────────────────────
+
   const attachActionListeners = () => {
     const tableContainer = document.getElementById('queue-table-container');
     if (!tableContainer) return;
 
-    // Event delegation — one listener per container, re-attached on every
-    // render, avoiding duplicate handlers across refreshes.
-    tableContainer.querySelectorAll('[data-allocate-id]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const beneficiaryId = btn.getAttribute('data-allocate-id');
-        if (beneficiaryId) handleAllocate(beneficiaryId);
+    // Close any open dropdown when clicking outside it. Bound once globally.
+    if (!outsideClickListenerAttached) {
+      document.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (!target.closest('.dropdown-container')) {
+          document.querySelectorAll('.dropdown-container[open]').forEach((details) => {
+            (details as HTMLDetailsElement).removeAttribute('open');
+          });
+        }
       });
-    });
-
-    tableContainer.querySelectorAll('[data-reject-id]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const beneficiaryId = btn.getAttribute('data-reject-id');
-        if (beneficiaryId) handleReject(beneficiaryId);
-      });
-    });
-
-    tableContainer.querySelectorAll('[data-explain-id]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const beneficiaryId = btn.getAttribute('data-explain-id');
-        if (beneficiaryId) handleShowExplanation(beneficiaryId);
-      });
-    });
-
-    // Individual priority-factor buttons. Since the backend has no
-    // removal/restore endpoint, clicking one opens the read-only preview
-    // (clearly labeled as a simulation) rather than a fake "remove" action.
-  // Inside attachActionListeners():
-tableContainer.querySelectorAll('[data-priority-factor]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const factor = btn.getAttribute('data-priority-factor') as PriorityFactorKey | null;
-    const beneficiaryId = btn.getAttribute('data-beneficiary-id');
-    const beneficiaryName = btn.getAttribute('data-beneficiary-name') || 'This beneficiary';
-    if (factor && beneficiaryId && beneficiaryId !== 'N/A') {
-      handlePreviewSingleFactor(beneficiaryId, factor, beneficiaryName);
+      outsideClickListenerAttached = true;
     }
-  });
-});
+
+    // Bind delegated listeners to the table container exactly once — this
+    // element persists across re-renders (Table.render only swaps its
+    // innerHTML), so re-adding listeners on every refresh would otherwise
+    // stack duplicate handlers.
+    if (tableContainer.dataset.listenersAttached === 'true') return;
+    tableContainer.dataset.listenersAttached = 'true';
+
+    tableContainer.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+
+      // Dropdown action items
+      const dropdownItem = target.closest('.dropdown-item') as HTMLElement | null;
+      if (dropdownItem) {
+        const details = dropdownItem.closest('details');
+        details?.removeAttribute('open');
+
+        const action = dropdownItem.getAttribute('data-action');
+        const beneficiaryId = dropdownItem.getAttribute('data-beneficiary-id');
+        if (!beneficiaryId || beneficiaryId === 'N/A') return;
+
+        switch (action) {
+          case 'allocate':
+            handleAllocate(beneficiaryId);
+            break;
+          case 'reject':
+            handleReject(beneficiaryId);
+            break;
+          case 'set-override': {
+            const beneficiaryName = dropdownItem.getAttribute('data-beneficiary-name') || 'This beneficiary';
+            const position = dropdownItem.getAttribute('data-position') || 'N/A';
+            handleSetOverride(beneficiaryId, beneficiaryName, position);
+            break;
+          }
+          case 'clear-override': {
+            const beneficiaryName = dropdownItem.getAttribute('data-beneficiary-name') || 'This beneficiary';
+            handleClearOverride(beneficiaryId, beneficiaryName);
+            break;
+          }
+          case 'explain':
+            handleShowExplanation(beneficiaryId);
+            break;
+        }
+        return;
+      }
+
+      // Priority factor preview badges
+      const factorBtn = target.closest('[data-priority-factor]') as HTMLElement | null;
+      if (factorBtn) {
+        const factor = factorBtn.getAttribute('data-priority-factor') as PriorityFactorKey | null;
+        const beneficiaryId = factorBtn.getAttribute('data-beneficiary-id');
+        const beneficiaryName = factorBtn.getAttribute('data-beneficiary-name') || 'This beneficiary';
+        if (factor && beneficiaryId && beneficiaryId !== 'N/A') {
+          handlePreviewSingleFactor(beneficiaryId, factor, beneficiaryName);
+        }
+      }
+    });
   };
+
+  // ─── Top-level controls ────────────────────────────────────────────────
 
   document.getElementById('btn-next-queue')?.addEventListener('click', () => {
     handleProcessNext();
@@ -661,12 +897,25 @@ tableContainer.querySelectorAll('[data-priority-factor]').forEach(btn => {
     handlePositionChecker();
   });
 
+  document.getElementById('filter-rank')?.addEventListener('change', renderFilteredTable);
+  document.getElementById('filter-beneficiary-institution')?.addEventListener('change', renderFilteredTable);
+  document.getElementById('filter-requesting-institution')?.addEventListener('change', renderFilteredTable);
+
+  document.getElementById('btn-clear-filters')?.addEventListener('click', () => {
+    (document.getElementById('filter-rank') as HTMLSelectElement).value = '';
+    (document.getElementById('filter-beneficiary-institution') as HTMLSelectElement).value = '';
+    (document.getElementById('filter-requesting-institution') as HTMLSelectElement).value = '';
+    renderFilteredTable();
+  });
+
   loadAndRenderTable();
 
-  // Exposed so preview/allocate/reject handlers below can trigger a full
-  // refresh without re-declaring the closure.
+  // Exposed so preview/allocate/reject/override handlers below can trigger
+  // a full refresh without re-declaring the closure.
   (window as any).__reloadQueueTable = loadAndRenderTable;
 }
+
+// ─── Action handlers (module scope) ──────────────────────────────────────
 
 /**
  * Process Next in Queue.
@@ -730,11 +979,15 @@ async function handleProcessNext() {
       confirmText: 'Approve & Allocate House',
       cancelText: 'Dismiss',
       onConfirm: async () => {
-        await store.apiService.post(`/house-allocation-queue/${next.beneficiaryId}/allocate`, {
-          houseId: '00000000-0000-0000-0000-000000000001'
-        });
-        Toast.success(`${next.beneficiaryName} has been successfully allocated a house.`);
-        (window as any).__reloadQueueTable?.();
+        try {
+          await store.apiService.post(`/house-allocation-queue/${next.beneficiaryId}/allocate`, {
+            houseId: '00000000-0000-0000-0000-000000000001'
+          });
+          Toast.success(`${next.beneficiaryName} has been successfully allocated a house.`);
+          await (window as any).__reloadQueueTable?.();
+        } catch (error: any) {
+          Toast.error(error?.response?.message || error?.message || 'Failed to allocate house. Please try again.');
+        }
       }
     });
 
@@ -769,11 +1022,15 @@ function handleAllocate(beneficiaryId: string) {
         Toast.error('House ID is required.');
         return;
       }
-      await store.apiService.post(`/house-allocation-queue/${beneficiaryId}/allocate`, {
-        houseId: houseId.trim()
-      });
-      Toast.success('Housing successfully allocated and beneficiary finalized.');
-      (window as any).__reloadQueueTable?.();
+      try {
+        await store.apiService.post(`/house-allocation-queue/${beneficiaryId}/allocate`, {
+          houseId: houseId.trim()
+        });
+        Toast.success('Housing successfully allocated and beneficiary finalized.');
+        await (window as any).__reloadQueueTable?.();
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to allocate housing. Please try again.');
+      }
     }
   });
 }
@@ -808,15 +1065,20 @@ function handleReject(beneficiaryId: string) {
         throw new Error('A rejection reason must be specified.');
       }
 
-      await store.apiService.patch(`/house-allocation-requests/beneficiaries/${beneficiaryId}/status`, {
-        status: 'unauthorized_by_directive',
-        reason: reason.trim()
-      });
-      Toast.success('Beneficiary rejected and removed from queue.');
-      (window as any).__reloadQueueTable?.();
+      try {
+        await store.apiService.patch(`/house-allocation-requests/beneficiaries/${beneficiaryId}/status`, {
+          status: 'unauthorized_by_directive',
+          reason: reason.trim()
+        });
+        Toast.success('Beneficiary rejected and removed from queue.');
+        await (window as any).__reloadQueueTable?.();
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to reject beneficiary. Please try again.');
+      }
     }
   });
 }
+
 async function fetchPriorityFactorPreview(
   beneficiaryId: string,
   factor: PriorityFactorKey,
@@ -825,12 +1087,135 @@ async function fetchPriorityFactorPreview(
     `/house-allocation-queue/${beneficiaryId}/priority-factor-preview?factor=${factor}`
   );
 }
+
+/**
+ * Sets a manual override for the given beneficiary, moving them to the
+ * front of the queue. Uses the live allFlattenedData snapshot (populated by
+ * loadAndRenderTable) to show a warning against whoever currently holds
+ * position #1. Reload after success/clear always goes through
+ * window.__reloadQueueTable, exposed by renderQueueManagement.
+ */
+async function handleSetOverride(beneficiaryId: string, beneficiaryName: string, currentPosition: string) {
+  const current = allFlattenedData.find(d => d.beneficiaryId === beneficiaryId);
+  const naturalLeader = allFlattenedData.find(d => d.position === 1);
+
+  const warningHTML = (naturalLeader && naturalLeader.beneficiaryId !== beneficiaryId)
+    ? `
+      <div class="p-3 bg-rose-50 border border-rose-150 rounded-lg text-xs text-rose-800 space-y-1.5">
+        <p class="font-bold flex items-center gap-1.5">
+          <i class="fa-solid fa-triangle-exclamation"></i> This bypasses the standard priority rules
+        </p>
+        <p>
+          Under tier / allocation history / rank / FIFO, <strong>${beneficiaryName}</strong> currently
+          ranks at position <strong>#${currentPosition}</strong>
+          (tier: ${current?.institutionTier ?? 'N/A'}, rank: ${current?.beneficiaryRank ?? 'N/A'},
+          history: ${current?.allocationHistoryCount ?? 0} prior allocation${current?.allocationHistoryCount === 1 ? '' : 's'}).
+        </p>
+        <p>
+          A manual override will place them ahead of
+          <strong>${naturalLeader.beneficiaryName}</strong> (${naturalLeader.institutionName}),
+          who currently holds position #1 under the standard hierarchy.
+        </p>
+      </div>
+    `
+    : `
+      <div class="p-3 bg-amber-50 border border-amber-150 rounded-lg text-xs text-amber-800">
+        <i class="fa-solid fa-circle-info mr-1"></i>
+        ${beneficiaryName} is already position #1 under the standard rules — an override isn't
+        needed to move them further, but it will still be recorded as an active manual override.
+      </div>
+    `;
+
+  Modal.open({
+    title: 'Manual Queue Override',
+    content: `
+      <div class="space-y-4">
+        ${warningHTML}
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">
+            Override Reason <span class="text-rose-500">*</span>
+          </label>
+          <textarea
+            name="overrideReason"
+            rows="3"
+            required
+            placeholder="State the official justification for overriding the standard queue rules..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-purple-500"
+          ></textarea>
+          <p class="text-[10px] text-slate-400 mt-1">Mandatory — permanently recorded for audit purposes.</p>
+        </div>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Confirm Override',
+    onConfirm: async (modalEl) => {
+      const reason = (modalEl.querySelector('[name="overrideReason"]') as HTMLTextAreaElement)?.value;
+      if (!reason || !reason.trim()) {
+        Toast.error('A reason is required to set a queue override.');
+        return;
+      }
+
+      try {
+        const result: any = await store.apiService.patch(`/house-allocation-queue/${beneficiaryId}/override`, {
+          reason: reason.trim(),
+        });
+        Toast.success(result?.message || `${beneficiaryName} moved to the front of the queue.`);
+        await (window as any).__reloadQueueTable?.();
+      } catch (error: any) {
+        console.error('Override failed:', error);
+        Toast.error(error?.response?.message || error?.message || 'Failed to set override. Please try again.');
+      }
+    }
+  });
+}
+
+async function handleClearOverride(beneficiaryId: string, beneficiaryName: string) {
+  Modal.open({
+    title: 'Clear Manual Override',
+    content: `
+      <div class="space-y-4">
+        <div class="p-3 bg-slate-50 border border-slate-150 rounded-lg text-xs text-slate-600">
+          <strong>${beneficiaryName}</strong> currently has an active manual override. Clearing it
+          returns them to whatever position the standard tier / history / rank / FIFO hierarchy gives them.
+        </div>
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500 tracking-wider mb-1.5">
+            Reason for Clearing <span class="text-rose-500">*</span>
+          </label>
+          <textarea
+            name="clearReason"
+            rows="3"
+            required
+            placeholder="State the reason for removing this override..."
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+          ></textarea>
+        </div>
+      </div>
+    `,
+    isForm: true,
+    confirmText: 'Clear Override',
+    onConfirm: async (modalEl) => {
+      const reason = (modalEl.querySelector('[name="clearReason"]') as HTMLTextAreaElement)?.value;
+      if (!reason || !reason.trim()) {
+        throw new Error('A reason is required to clear a queue override.');
+      }
+      try {
+        const result: any = await store.apiService.patch(`/house-allocation-queue/${beneficiaryId}/override/clear`, {
+          reason: reason.trim(),
+        });
+        Toast.success(result?.message || `Override cleared for ${beneficiaryName}.`);
+        await (window as any).__reloadQueueTable?.();
+      } catch (error: any) {
+        Toast.error(error?.response?.message || error?.message || 'Failed to clear override. Please try again.');
+      }
+    }
+  });
+}
+
 /**
  * Clicking one priority-factor icon opens a focused, single-factor preview.
  * STATELESS — calls GET /house-allocation-queue/:id/priority-factor-preview?factor=...
- * Nothing is saved, removed, or restored. The confirmation-style modal the
- * task spec describes ("Remove Priority Factor?") is replaced with an
- * honest preview, since no removal endpoint exists on the backend.
+ * Nothing is saved, removed, or restored.
  */
 async function handlePreviewSingleFactor(
   beneficiaryId: string,
@@ -892,6 +1277,7 @@ async function handlePreviewSingleFactor(
     },
   });
 }
+
 async function handleShowExplanation(beneficiaryId: string) {
   try {
     const explanation: any = await store.apiService.get(`/house-allocation-queue/priority-breakdown/${beneficiaryId}`);
